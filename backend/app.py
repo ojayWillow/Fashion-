@@ -93,6 +93,49 @@ def get_product(slug: str):
     return product
 
 
+@app.patch("/api/products/{slug}")
+def update_product(slug: str, updates: dict):
+    """Update product fields. Supports: category, name, featured."""
+    conn = get_db()
+    product = get_product_by_slug(conn, slug)
+    if not product:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    allowed = {'category', 'name', 'featured', 'brand', 'colorway'}
+    fields_to_update = {k: v for k, v in updates.items() if k in allowed}
+
+    if not fields_to_update:
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"No valid fields. Allowed: {allowed}")
+
+    set_clause = ", ".join(f"{k} = ?" for k in fields_to_update)
+    values = list(fields_to_update.values()) + [slug]
+    conn.execute(f"UPDATE products SET {set_clause}, updated_at = datetime('now') WHERE slug = ?", values)
+    conn.commit()
+    conn.close()
+
+    return {"message": "Updated", "fields": list(fields_to_update.keys())}
+
+
+@app.delete("/api/products/{slug}")
+def delete_product(slug: str):
+    """Delete a product and its images/sizes."""
+    conn = get_db()
+    row = conn.execute("SELECT id FROM products WHERE slug = ?", (slug,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    pid = row["id"]
+    conn.execute("DELETE FROM product_images WHERE product_id = ?", (pid,))
+    conn.execute("DELETE FROM product_sizes WHERE product_id = ?", (pid,))
+    conn.execute("DELETE FROM products WHERE id = ?", (pid,))
+    conn.commit()
+    conn.close()
+    return {"message": "Deleted"}
+
+
 @app.post("/api/products/shopify")
 def add_shopify_product(input: ShopifyFetchInput):
     try:
@@ -166,7 +209,6 @@ def list_categories():
 
 @app.get("/api/sizes")
 def list_sizes(category: Optional[str] = None):
-    """Get all available sizes, optionally filtered by category."""
     conn = get_db()
     if category:
         rows = conn.execute(

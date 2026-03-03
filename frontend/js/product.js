@@ -1,12 +1,15 @@
 /* Product detail page logic */
 
-const API_BASE = '';  // Same origin
-
+const API_BASE = '';
 const container = document.getElementById('product-detail');
+
+let currentSlug = null;
+let currentCategory = null;
 
 async function loadProduct() {
     const params = new URLSearchParams(window.location.search);
     const slug = params.get('slug');
+    currentSlug = slug;
 
     if (!slug) {
         container.innerHTML = '<div class="empty-state"><h2>No product specified</h2></div>';
@@ -17,11 +20,14 @@ async function loadProduct() {
         const res = await fetch(`${API_BASE}/api/products/${slug}`);
         if (!res.ok) throw new Error('Not found');
         const p = await res.json();
+        currentCategory = p.category || 'sneakers';
 
         document.title = `${p.name} | FASHION-`;
         container.innerHTML = renderDetail(p);
         initGallery(p.images);
         initSizes();
+        initEditCategory();
+        initDelete(p.slug, p.name);
     } catch (e) {
         container.innerHTML = `
             <div class="empty-state">
@@ -35,8 +41,10 @@ function renderDetail(p) {
     const savings = (p.original_price - p.sale_price).toFixed(2);
     const totalCost = p.sale_price + p.shipping_cost;
     const freeShip = p.free_ship_min && p.sale_price >= p.free_ship_min;
-
     const mainImg = p.images.length > 0 ? p.images[0].image_url : '';
+
+    const catLabels = { sneakers: '\ud83d\udc5f Sneakers', clothing: '\ud83d\udc55 Clothing', accessories: '\ud83c\udfa9 Accessories', kids: '\ud83e\udde1 Kids', toddler: '\ud83d\udc76 Toddler' };
+    const catLabel = catLabels[p.category] || p.category || 'Unknown';
 
     const thumbs = p.images.map((img, i) => `
         <div class="gallery-thumb ${i === 0 ? 'active' : ''}" data-index="${i}">
@@ -77,24 +85,41 @@ function renderDetail(p) {
                 ${p.colorway ? `<div class="detail-colorway">${esc(p.colorway)}</div>` : ''}
             </div>
 
+            <!-- Category (editable) -->
+            <div class="detail-category">
+                <span class="category-label" id="category-display">${catLabel}</span>
+                <button class="edit-btn" id="edit-category-btn" title="Change category">\u270e</button>
+                <div class="category-editor hidden" id="category-editor">
+                    <select class="filter-select" id="category-select">
+                        <option value="sneakers" ${p.category === 'sneakers' ? 'selected' : ''}>\ud83d\udc5f Sneakers</option>
+                        <option value="clothing" ${p.category === 'clothing' ? 'selected' : ''}>\ud83d\udc55 Clothing</option>
+                        <option value="accessories" ${p.category === 'accessories' ? 'selected' : ''}>\ud83c\udfa9 Accessories</option>
+                        <option value="kids" ${p.category === 'kids' ? 'selected' : ''}>\ud83e\udde1 Kids</option>
+                        <option value="toddler" ${p.category === 'toddler' ? 'selected' : ''}>\ud83d\udc76 Toddler</option>
+                    </select>
+                    <button class="save-category-btn" id="save-category-btn">Save</button>
+                    <button class="cancel-btn" id="cancel-category-btn">Cancel</button>
+                </div>
+            </div>
+
             <div class="detail-price-block">
                 <div class="detail-prices">
-                    <span class="detail-price-sale">€${p.sale_price.toFixed(2)}</span>
+                    <span class="detail-price-sale">\u20ac${p.sale_price.toFixed(2)}</span>
                     ${p.original_price > p.sale_price
-                        ? `<span class="detail-price-original">€${p.original_price.toFixed(2)}</span>
+                        ? `<span class="detail-price-original">\u20ac${p.original_price.toFixed(2)}</span>
                            <span class="detail-discount-badge">-${p.discount_pct}%</span>`
                         : ''}
                 </div>
                 ${p.original_price > p.sale_price
-                    ? `<div class="detail-savings">You save €${savings}</div>`
+                    ? `<div class="detail-savings">You save \u20ac${savings}</div>`
                     : ''}
                 <div class="detail-shipping">
                     Shipping to Latvia: ${freeShip
                         ? '<span style="color: var(--success); font-weight: 600;">FREE</span>'
-                        : `<span class="detail-total">€${p.shipping_cost.toFixed(2)}</span> via ${esc(p.store_name)}`
+                        : `<span class="detail-total">\u20ac${p.shipping_cost.toFixed(2)}</span> via ${esc(p.store_name)}`
                     }
                     <br>
-                    Total cost: <span class="detail-total">€${freeShip ? p.sale_price.toFixed(2) : totalCost.toFixed(2)}</span>
+                    Total cost: <span class="detail-total">\u20ac${freeShip ? p.sale_price.toFixed(2) : totalCost.toFixed(2)}</span>
                 </div>
             </div>
 
@@ -106,13 +131,78 @@ function renderDetail(p) {
             ` : ''}
 
             <a href="${esc(p.product_url)}" target="_blank" rel="noopener" class="buy-btn">
-                Buy Now at ${esc(p.store_name)} →
+                Buy Now at ${esc(p.store_name)} \u2192
             </a>
             <p class="buy-btn-subtext">Opens the store in a new tab</p>
+
+            <button class="delete-btn" id="delete-btn">\ud83d\uddd1 Delete Product</button>
 
             ${desc}
         </div>
     `;
+}
+
+function initEditCategory() {
+    const editBtn = document.getElementById('edit-category-btn');
+    const editor = document.getElementById('category-editor');
+    const saveBtn = document.getElementById('save-category-btn');
+    const cancelBtn = document.getElementById('cancel-category-btn');
+    const display = document.getElementById('category-display');
+    const select = document.getElementById('category-select');
+
+    if (!editBtn) return;
+
+    editBtn.addEventListener('click', () => {
+        editor.classList.remove('hidden');
+        editBtn.classList.add('hidden');
+    });
+
+    cancelBtn.addEventListener('click', () => {
+        editor.classList.add('hidden');
+        editBtn.classList.remove('hidden');
+    });
+
+    saveBtn.addEventListener('click', async () => {
+        const newCategory = select.value;
+        try {
+            const res = await fetch(`${API_BASE}/api/products/${currentSlug}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ category: newCategory }),
+            });
+            if (res.ok) {
+                const catLabels = { sneakers: '\ud83d\udc5f Sneakers', clothing: '\ud83d\udc55 Clothing', accessories: '\ud83c\udfa9 Accessories', kids: '\ud83e\udde1 Kids', toddler: '\ud83d\udc76 Toddler' };
+                display.textContent = catLabels[newCategory] || newCategory;
+                editor.classList.add('hidden');
+                editBtn.classList.remove('hidden');
+                currentCategory = newCategory;
+            } else {
+                alert('Failed to update category');
+            }
+        } catch (e) {
+            alert('Error: ' + e.message);
+        }
+    });
+}
+
+function initDelete(slug, name) {
+    const btn = document.getElementById('delete-btn');
+    if (!btn) return;
+
+    btn.addEventListener('click', async () => {
+        if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
+
+        try {
+            const res = await fetch(`${API_BASE}/api/products/${slug}`, { method: 'DELETE' });
+            if (res.ok) {
+                window.location.href = '/';
+            } else {
+                alert('Failed to delete product');
+            }
+        } catch (e) {
+            alert('Error: ' + e.message);
+        }
+    });
 }
 
 function initGallery(images) {
