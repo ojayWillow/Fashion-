@@ -1,8 +1,6 @@
 /* Product detail page logic */
 
-const API_BASE = window.location.hostname === 'localhost'
-    ? 'http://localhost:8000'
-    : '';
+const API_BASE = '';  // Same origin
 
 const container = document.getElementById('product-detail');
 
@@ -40,14 +38,12 @@ function renderDetail(p) {
 
     const mainImg = p.images.length > 0 ? p.images[0].image_url : '';
 
-    // Gallery thumbnails
     const thumbs = p.images.map((img, i) => `
         <div class="gallery-thumb ${i === 0 ? 'active' : ''}" data-index="${i}">
             <img src="${img.image_url}" alt="${img.alt_text || p.name}">
         </div>
     `).join('');
 
-    // Sizes
     const sizeButtons = p.sizes.map(s => `
         <button class="size-btn ${s.in_stock ? '' : 'out-of-stock'}"
                 ${s.in_stock ? '' : 'disabled'}
@@ -59,7 +55,6 @@ function renderDetail(p) {
     const sizesInStock = p.sizes.filter(s => s.in_stock).length;
     const totalSizes = p.sizes.length;
 
-    // Description
     const desc = p.description
         ? `<div class="detail-description">
             <h3>Description</h3>

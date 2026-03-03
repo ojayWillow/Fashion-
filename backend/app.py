@@ -1,10 +1,13 @@
-"""FastAPI application — serves the catalog API.
+"""FastAPI application — serves the catalog API + frontend.
 
 Run with:
     cd backend && uvicorn app:app --reload --port 8000
 """
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from pathlib import Path
 from typing import Optional
 
 from database import get_db, init_db, insert_product, insert_images, insert_sizes, get_all_products, get_product_by_slug, get_store_by_platform
@@ -24,6 +27,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
 
 @app.on_event("startup")
@@ -164,3 +169,23 @@ def list_brands():
     ).fetchall()
     conn.close()
     return [r["brand"] for r in rows]
+
+
+# --- Serve Frontend ---
+# Mount static files (CSS, JS) and serve HTML pages
+
+if FRONTEND_DIR.exists():
+    app.mount("/css", StaticFiles(directory=str(FRONTEND_DIR / "css")), name="css")
+    app.mount("/js", StaticFiles(directory=str(FRONTEND_DIR / "js")), name="js")
+
+    @app.get("/")
+    def serve_index():
+        return FileResponse(str(FRONTEND_DIR / "index.html"))
+
+    @app.get("/product")
+    def serve_product_page():
+        return FileResponse(str(FRONTEND_DIR / "product.html"))
+
+    @app.get("/admin")
+    def serve_admin_page():
+        return FileResponse(str(FRONTEND_DIR / "admin.html"))

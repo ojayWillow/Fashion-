@@ -1,8 +1,6 @@
 /* Catalog grid page logic */
 
-const API_BASE = window.location.hostname === 'localhost'
-    ? 'http://localhost:8000'
-    : '';  // Same origin in production
+const API_BASE = '';  // Same origin — FastAPI serves everything
 
 const grid = document.getElementById('product-grid');
 const brandFilter = document.getElementById('filter-brand');
@@ -53,8 +51,8 @@ async function loadProducts() {
         if (!products.length) {
             grid.innerHTML = `
                 <div class="empty-state">
-                    <h2>No deals found</h2>
-                    <p>Try adjusting your filters</p>
+                    <h2>No deals yet</h2>
+                    <p>Go to <a href="/admin" style="color:var(--accent)">Admin</a> to add your first product</p>
                 </div>`;
             return;
         }
@@ -64,14 +62,14 @@ async function loadProducts() {
         // Click handlers
         grid.querySelectorAll('.product-card').forEach(card => {
             card.addEventListener('click', () => {
-                window.location.href = `product.html?slug=${card.dataset.slug}`;
+                window.location.href = `/product?slug=${card.dataset.slug}`;
             });
         });
     } catch (e) {
         grid.innerHTML = `
             <div class="empty-state">
                 <h2>Could not load products</h2>
-                <p>Make sure the API server is running on port 8000</p>
+                <p>Make sure the server is running</p>
             </div>`;
     }
 }
