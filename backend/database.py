@@ -7,7 +7,6 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
 def get_db() -> sqlite3.Connection:
-    """Get a database connection with row factory."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
@@ -16,22 +15,27 @@ def get_db() -> sqlite3.Connection:
 
 
 def init_db():
-    """Initialize database from schema.sql."""
     conn = get_db()
     with open(SCHEMA_PATH, "r") as f:
         conn.executescript(f.read())
+    # Add category column if upgrading from older schema
+    try:
+        conn.execute("SELECT category FROM products LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE products ADD COLUMN category TEXT NOT NULL DEFAULT 'sneakers'")
+        conn.commit()
+        print("[FASHION-] Added 'category' column to products table")
     conn.close()
     print(f"Database initialized at {DB_PATH}")
 
 
 def insert_product(conn: sqlite3.Connection, product: dict) -> int:
-    """Insert a product and return its ID."""
     cursor = conn.execute(
         """INSERT INTO products
-        (store_id, name, brand, slug, sku, colorway,
+        (store_id, name, brand, slug, sku, colorway, category,
          original_price, sale_price, discount_pct,
-         description, product_url)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+         description, product_url, in_stock)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             product["store_id"],
             product["name"],
@@ -39,18 +43,19 @@ def insert_product(conn: sqlite3.Connection, product: dict) -> int:
             product["slug"],
             product.get("sku"),
             product.get("colorway"),
+            product.get("category", "sneakers"),
             product["original_price"],
             product["sale_price"],
             product["discount_pct"],
             product.get("description"),
             product["product_url"],
+            1 if product.get("in_stock", True) else 0,
         ),
     )
     return cursor.lastrowid
 
 
 def insert_images(conn: sqlite3.Connection, product_id: int, images: list):
-    """Insert product images."""
     for i, img in enumerate(images):
         conn.execute(
             """INSERT INTO product_images (product_id, image_url, position, alt_text)
@@ -60,7 +65,6 @@ def insert_images(conn: sqlite3.Connection, product_id: int, images: list):
 
 
 def insert_sizes(conn: sqlite3.Connection, product_id: int, sizes: list):
-    """Insert product sizes."""
     for size in sizes:
         conn.execute(
             """INSERT OR REPLACE INTO product_sizes
@@ -76,7 +80,6 @@ def insert_sizes(conn: sqlite3.Connection, product_id: int, sizes: list):
 
 
 def get_store_by_platform(conn: sqlite3.Connection, base_url: str) -> dict | None:
-    """Find a store by its base URL."""
     row = conn.execute(
         "SELECT * FROM stores WHERE base_url = ?", (base_url,)
     ).fetchone()
@@ -84,8 +87,8 @@ def get_store_by_platform(conn: sqlite3.Connection, base_url: str) -> dict | Non
 
 
 def get_all_products(conn: sqlite3.Connection, filters: dict = None) -> list:
-    """Get all products with optional filters."""
-    query = "SELECT p.*, s.name as store_name, s.shipping_cost FROM products p JOIN stores s ON p.store_id = s.id WHERE 1=1"
+    query = """SELECT p.*, s.name as store_name, s.shipping_cost
+               FROM products p JOIN stores s ON p.store_id = s.id WHERE 1=1"""
     params = []
 
     if filters:
@@ -97,9 +100,15 @@ def get_all_products(conn: sqlite3.Connection, filters: dict = None) -> list:
         if filters.get("store_id"):
             query += " AND p.store_id = ?"
             params.append(filters["store_id"])
-        if filters.get("min_discount"):
-            query += " AND p.discount_pct >= ?"
-            params.append(filters["min_discount"])
+        if filters.get("category"):
+            query += " AND p.category = ?"
+            params.append(filters["category"])
+        if filters.get("size"):
+            query += """ AND p.id IN (
+                SELECT product_id FROM product_sizes
+                WHERE size_label = ? AND in_stock = 1
+            )"""
+            params.append(filters["size"])
 
     query += " ORDER BY p.featured DESC, p.sort_order ASC, p.added_at DESC"
     rows = conn.execute(query, params).fetchall()
@@ -107,7 +116,6 @@ def get_all_products(conn: sqlite3.Connection, filters: dict = None) -> list:
 
 
 def get_product_by_slug(conn: sqlite3.Connection, slug: str) -> dict | None:
-    """Get a single product by slug, including images and sizes."""
     row = conn.execute(
         """SELECT p.*, s.name as store_name, s.shipping_cost, s.free_ship_min
         FROM products p JOIN stores s ON p.store_id = s.id

@@ -11,7 +11,7 @@
         .form-section h2 { font-size: 1.1rem; margin-bottom: 16px; color: var(--accent); }
         .form-group { margin-bottom: 16px; }
         .form-group label { display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
-        .form-input { width: 100%; background: var(--bg-secondary); border: 1px solid var(--border); color: var(--text-primary); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 0.95rem; font-family: var(--font-main); }
+        .form-input { width: 100%; background: var(--bg-secondary); border: 1px solid var(--border); color: var(--text-primary); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 0.95rem; font-family: var(--font-main); box-sizing: border-box; }
         .form-input:focus { border-color: var(--accent); outline: none; }
         textarea.form-input { min-height: 100px; resize: vertical; }
         .form-hint { font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; }
@@ -26,6 +26,9 @@
         .result-success { background: rgba(0,255,136,0.1); border: 1px solid var(--success); color: var(--success); }
         .result-error { background: var(--sale-glow); border: 1px solid var(--sale); color: var(--sale); }
         .hidden { display: none; }
+        .category-pills { display: flex; gap: 8px; flex-wrap: wrap; }
+        .category-pill { padding: 8px 16px; border: 1px solid var(--border); border-radius: 20px; background: var(--bg-secondary); color: var(--text-secondary); cursor: pointer; font-size: 0.9rem; transition: all 0.2s; }
+        .category-pill.active { background: var(--accent); color: var(--bg-primary); border-color: var(--accent); font-weight: 600; }
     </style>
 </head>
 <body>
@@ -47,14 +50,21 @@
         <!-- Shopify Tab -->
         <form id="shopify-form">
             <div class="form-section">
-                <h2>Paste AFEW Store URL</h2>
+                <h2>Paste Store URL</h2>
                 <div class="form-group">
                     <label>Product URL</label>
                     <input type="url" class="form-input" id="shopify-url" placeholder="https://en.afew-store.com/products/..." required>
-                    <div class="form-hint">The system will fetch all data automatically from the Shopify JSON API</div>
+                    <div class="form-hint">Works with any Shopify store (AFEW, etc.)</div>
                 </div>
-                <div class="form-group">
-                    <label><input type="checkbox" id="shopify-featured"> Featured (show on homepage)</label>
+            </div>
+            <div class="form-section">
+                <h2>Category</h2>
+                <div class="category-pills" id="shopify-category">
+                    <div class="category-pill active" data-value="sneakers">👟 Sneakers</div>
+                    <div class="category-pill" data-value="clothing">👕 Clothing</div>
+                    <div class="category-pill" data-value="accessories">🎩 Accessories</div>
+                    <div class="category-pill" data-value="kids">🧡 Kids</div>
+                    <div class="category-pill" data-value="toddler">👶 Toddler</div>
                 </div>
             </div>
             <button type="submit" class="submit-btn">Fetch & Add Product</button>
@@ -71,6 +81,16 @@
                 <div class="form-group">
                     <label>Brand *</label>
                     <input type="text" class="form-input" id="manual-brand" placeholder="Nike">
+                </div>
+                <div class="form-group">
+                    <label>Category</label>
+                    <select class="form-input" id="manual-category">
+                        <option value="sneakers">👟 Sneakers</option>
+                        <option value="clothing">👕 Clothing</option>
+                        <option value="accessories">🎩 Accessories</option>
+                        <option value="kids">🧡 Kids</option>
+                        <option value="toddler">👶 Toddler</option>
+                    </select>
                 </div>
                 <div class="form-group">
                     <label>Colorway</label>
@@ -125,9 +145,6 @@
                         <option value="1">AFEW Store (€7.99 shipping)</option>
                     </select>
                 </div>
-                <div class="form-group">
-                    <label><input type="checkbox" id="manual-featured"> Featured</label>
-                </div>
             </div>
             <button type="submit" class="submit-btn">Add Product</button>
         </form>
@@ -136,7 +153,7 @@
     </main>
 
     <script>
-        const API_BASE = window.location.hostname === 'localhost' ? 'http://localhost:8000' : '';
+        const API_BASE = '';
         const resultDiv = document.getElementById('result');
 
         // Tab switching
@@ -151,12 +168,27 @@
             });
         });
 
+        // Category pill selection
+        document.querySelectorAll('.category-pills').forEach(container => {
+            container.querySelectorAll('.category-pill').forEach(pill => {
+                pill.addEventListener('click', () => {
+                    container.querySelectorAll('.category-pill').forEach(p => p.classList.remove('active'));
+                    pill.classList.add('active');
+                });
+            });
+        });
+
+        function getSelectedCategory() {
+            const active = document.querySelector('#shopify-category .category-pill.active');
+            return active ? active.dataset.value : 'sneakers';
+        }
+
         // Shopify form
         document.getElementById('shopify-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             const body = {
                 product_url: document.getElementById('shopify-url').value,
-                featured: document.getElementById('shopify-featured').checked,
+                category: getSelectedCategory(),
             };
             await submitProduct('/api/products/shopify', body);
         });
@@ -172,6 +204,7 @@
             const body = {
                 name: document.getElementById('manual-name').value,
                 brand: document.getElementById('manual-brand').value,
+                category: document.getElementById('manual-category').value,
                 colorway: document.getElementById('manual-colorway').value || null,
                 sku: document.getElementById('manual-sku').value || null,
                 original_price: parseFloat(document.getElementById('manual-original-price').value) || null,
@@ -181,7 +214,6 @@
                 sizes: sizes,
                 description: document.getElementById('manual-description').value || '',
                 store_id: parseInt(document.getElementById('manual-store').value),
-                featured: document.getElementById('manual-featured').checked,
             };
             await submitProduct('/api/products/manual', body);
         });

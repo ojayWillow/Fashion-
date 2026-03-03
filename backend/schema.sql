@@ -5,9 +5,9 @@ CREATE TABLE IF NOT EXISTS stores (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL,
     base_url        TEXT NOT NULL,
-    platform        TEXT NOT NULL,          -- 'shopify' or 'custom'
-    shipping_cost   REAL NOT NULL,          -- EUR to Latvia
-    free_ship_min   REAL,                   -- free shipping threshold (or NULL)
+    platform        TEXT NOT NULL,
+    shipping_cost   REAL NOT NULL,
+    free_ship_min   REAL,
     currency        TEXT NOT NULL DEFAULT 'EUR',
     logo_url        TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS products (
     slug            TEXT NOT NULL UNIQUE,
     sku             TEXT,
     colorway        TEXT,
+    category        TEXT NOT NULL DEFAULT 'sneakers',
 
     -- Pricing
     original_price  REAL NOT NULL,
@@ -74,12 +75,14 @@ CREATE TABLE IF NOT EXISTS stock_checks (
     raw_response    TEXT
 );
 
--- Indexes for common queries
+-- Indexes
 CREATE INDEX IF NOT EXISTS idx_products_store ON products(store_id);
 CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand);
+CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
 CREATE INDEX IF NOT EXISTS idx_products_in_stock ON products(in_stock);
 CREATE INDEX IF NOT EXISTS idx_products_discount ON products(discount_pct DESC);
 CREATE INDEX IF NOT EXISTS idx_product_sizes_product ON product_sizes(product_id);
+CREATE INDEX IF NOT EXISTS idx_product_sizes_label ON product_sizes(size_label);
 CREATE INDEX IF NOT EXISTS idx_product_images_product ON product_images(product_id);
 CREATE INDEX IF NOT EXISTS idx_stock_checks_product ON stock_checks(product_id);
 

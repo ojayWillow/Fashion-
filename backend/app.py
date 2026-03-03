@@ -1,8 +1,4 @@
-"""FastAPI application — serves the catalog API + frontend.
-
-Run with:
-    cd backend && uvicorn app:app --reload --port 8000
-"""
+"""FastAPI application — serves the catalog API + frontend."""
 import sys
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,11 +12,7 @@ from models import ManualProductInput, ShopifyFetchInput, ProductCardOut, Produc
 from fetchers.shopify import fetch_shopify_product
 from fetchers.manual import build_manual_product
 
-app = FastAPI(
-    title="Fashion Catalog API",
-    description="Curated streetwear deals aggregator",
-    version="0.1.0",
-)
+app = FastAPI(title="Fashion Catalog API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,10 +21,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Resolve frontend directory (works from both backend/ and project root)
 FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend")
-print(f"[FASHION-] Frontend directory: {FRONTEND_DIR}")
-print(f"[FASHION-] Frontend exists: {FRONTEND_DIR.exists()}")
 
 
 @app.on_event("startup")
@@ -40,8 +29,6 @@ def startup():
     init_db()
     print("[FASHION-] Server ready! Open http://127.0.0.1:8000 in your browser.")
 
-
-# --- Stores ---
 
 @app.get("/api/stores", response_model=list[StoreOut])
 def list_stores():
@@ -51,14 +38,13 @@ def list_stores():
     return [dict(r) for r in rows]
 
 
-# --- Catalog ---
-
 @app.get("/api/products")
 def list_products(
     brand: Optional[str] = None,
     store_id: Optional[int] = None,
+    category: Optional[str] = None,
+    size: Optional[str] = None,
     in_stock: bool = True,
-    min_discount: Optional[int] = None,
     sort: str = Query("newest", enum=["newest", "price_asc", "price_desc", "discount", "total_cost"]),
 ):
     conn = get_db()
@@ -67,10 +53,12 @@ def list_products(
         filters["brand"] = brand
     if store_id:
         filters["store_id"] = store_id
+    if category:
+        filters["category"] = category
+    if size:
+        filters["size"] = size
     if in_stock:
         filters["in_stock"] = True
-    if min_discount:
-        filters["min_discount"] = min_discount
 
     products = get_all_products(conn, filters)
 
@@ -105,8 +93,6 @@ def get_product(slug: str):
     return product
 
 
-# --- Add Products ---
-
 @app.post("/api/products/shopify")
 def add_shopify_product(input: ShopifyFetchInput):
     try:
@@ -118,6 +104,8 @@ def add_shopify_product(input: ShopifyFetchInput):
     store = get_store_by_platform(conn, product_data["_base_url"])
     store_id = store["id"] if store else input.store_id
     product_data["store_id"] = store_id
+    if input.category:
+        product_data["category"] = input.category
 
     try:
         product_id = insert_product(conn, product_data)
@@ -160,10 +148,40 @@ def add_manual_product(input: ManualProductInput):
 def list_brands():
     conn = get_db()
     rows = conn.execute(
-        "SELECT DISTINCT brand FROM products WHERE in_stock = 1 ORDER BY brand"
+        "SELECT DISTINCT brand FROM products ORDER BY brand"
     ).fetchall()
     conn.close()
     return [r["brand"] for r in rows]
+
+
+@app.get("/api/categories")
+def list_categories():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT DISTINCT category FROM products ORDER BY category"
+    ).fetchall()
+    conn.close()
+    return [r["category"] for r in rows]
+
+
+@app.get("/api/sizes")
+def list_sizes(category: Optional[str] = None):
+    """Get all available sizes, optionally filtered by category."""
+    conn = get_db()
+    if category:
+        rows = conn.execute(
+            """SELECT DISTINCT ps.size_label FROM product_sizes ps
+               JOIN products p ON ps.product_id = p.id
+               WHERE ps.in_stock = 1 AND p.category = ?
+               ORDER BY ps.size_label""",
+            (category,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT DISTINCT size_label FROM product_sizes WHERE in_stock = 1 ORDER BY size_label"
+        ).fetchall()
+    conn.close()
+    return [r["size_label"] for r in rows]
 
 
 # --- Serve Frontend ---
@@ -189,11 +207,5 @@ try:
             return FileResponse(str(FRONTEND_DIR / "admin.html"))
 
         print(f"[FASHION-] Frontend mounted from {FRONTEND_DIR}")
-    else:
-        print(f"[FASHION-] WARNING: Frontend dirs not found at {FRONTEND_DIR}")
-        print(f"[FASHION-]   css exists: {css_dir.exists()}")
-        print(f"[FASHION-]   js exists: {js_dir.exists()}")
-        print(f"[FASHION-]   API-only mode — use http://127.0.0.1:8000/docs")
 except Exception as e:
     print(f"[FASHION-] ERROR mounting frontend: {e}")
-    print(f"[FASHION-]   API-only mode — use http://127.0.0.1:8000/docs")
