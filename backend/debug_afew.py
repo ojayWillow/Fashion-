@@ -1,57 +1,93 @@
-"""Debug script v2 - find images and availability in HTML."""
+"""Debug script v3 - try all Shopify endpoints."""
 import requests
 import json
-import re
 
-headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+BASE = "https://en.afew-store.com"
+HANDLE = "converse-chuck-70-ox-light-dune-black-egret"
+HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
 
-print("=== FETCHING PAGE ===")
-r = requests.get("https://en.afew-store.com/products/converse-chuck-70-ox-light-dune-black-egret", timeout=15, headers=headers)
-html = r.text
-print(f"Length: {len(html)}")
+# Get product ID and variant IDs from JSON
+print("=== PRODUCT JSON ===")
+r = requests.get(f"{BASE}/products/{HANDLE}.json", timeout=15)
+data = r.json()["product"]
+product_id = data["id"]
+print(f"Product ID: {product_id}")
+print(f"Images in JSON: {len(data.get('images', []))}")
+print(f"Variants: {len(data.get('variants', []))}")
+first_available = data['variants'][0].get('available')
+print(f"First variant available field: {first_available} (type: {type(first_available).__name__})")
 
+# Test 1: /products/{handle}/variants.json
 print()
-print("=== ALL CDN IMAGES (no /products/ filter) ===")
-cdn_matches = re.findall(r'(?:https?:)?//cdn\.shopify\.com/s/files/[^"\s)}\'><]+\.(?:jpg|jpeg|png|webp)', html, re.IGNORECASE)
-unique = set()
-for u in cdn_matches:
-    clean = re.sub(r'_(pico|icon|thumb|small|compact|medium|large|grande|original|master|\d+x\d*|\d*x\d+)\.', '.', u.split('?')[0]).lower()
-    if clean not in unique:
-        unique.add(clean)
-        print(f"  {u[:150]}")
-print(f"Total unique CDN images: {len(unique)}")
+print("=== TEST 1: variants.json ===")
+try:
+    r = requests.get(f"{BASE}/products/{HANDLE}/variants.json", timeout=5, headers=HEADERS)
+    print(f"Status: {r.status_code}")
+    if r.ok:
+        vdata = r.json()
+        print(f"Keys: {list(vdata.keys()) if isinstance(vdata, dict) else 'list'}")
+        if 'variants' in vdata:
+            v0 = vdata['variants'][0]
+            print(f"First variant available: {v0.get('available')}")
+except Exception as e:
+    print(f"Error: {e}")
 
+# Test 2: /products/{handle}.js
 print()
-print("=== LOOKING FOR EMBEDDED PRODUCT JSON ===")
-# Search for variant availability in embedded JS
-patterns = [
-    (r'"available"\s*:\s*(true|false)', 'available fields'),
-    (r'"variants"\s*:\s*\[', 'variants arrays'),
-]
-for pat, desc in patterns:
-    matches = re.findall(pat, html)
-    print(f"{desc}: {len(matches)} matches")
-    if desc == 'available fields':
-        from collections import Counter
-        print(f"  Values: {Counter(matches)}")
+print("=== TEST 2: product.js ===")
+try:
+    r = requests.get(f"{BASE}/products/{HANDLE}.js", timeout=5, headers=HEADERS)
+    print(f"Status: {r.status_code}")
+    if r.ok:
+        jdata = r.json()
+        print(f"Keys: {list(jdata.keys())}")
+        print(f"Images: {len(jdata.get('images', []))}")
+        print(f"Media: {len(jdata.get('media', []))}")
+        if jdata.get('media'):
+            for m in jdata['media'][:3]:
+                print(f"  type={m.get('media_type')}, src={m.get('src', m.get('preview_image', {}).get('src', '?'))[:100]}")
+        if jdata.get('images'):
+            for img in jdata['images'][:5]:
+                if isinstance(img, str):
+                    print(f"  {img[:120]}")
+                elif isinstance(img, dict):
+                    print(f"  {img.get('src', '?')[:120]}")
+        if jdata.get('variants'):
+            print(f"Variants: {len(jdata['variants'])}")
+            for v in jdata['variants'][:3]:
+                print(f"  id={v.get('id')} title={v.get('option1', v.get('title'))} available={v.get('available')}")
+except Exception as e:
+    print(f"Error: {e}")
 
+# Test 3: Check a single variant
 print()
-print("=== SEARCHING FOR PRODUCT DATA IN SCRIPTS ===")
-script_pattern = r'<script[^>]*>(.*?)</script>'
-for i, match in enumerate(re.findall(script_pattern, html, re.DOTALL)):
-    if '"available"' in match and '"variants"' in match:
-        print(f"Script #{i}: contains variants+available ({len(match)} chars)")
-        # Try to find the JSON object
-        try:
-            # Find anything that looks like a product JSON
-            json_pat = r'(\{[^{}]*"variants"\s*:\s*\[[^\]]*\].*?\})'
-            for j_match in re.findall(json_pat, match, re.DOTALL)[:1]:
-                print(f"  Found JSON-like block ({len(j_match)} chars)")
-                print(f"  First 300 chars: {j_match[:300]}")
-        except Exception as e:
-            print(f"  Parse error: {e}")
-        # Also just show a snippet around 'available'
-        idx = match.find('"available"')
-        if idx >= 0:
-            snippet = match[max(0,idx-50):idx+100]
-            print(f"  Snippet: ...{snippet}...")
+print("=== TEST 3: single variant JSON ===")
+vid = data['variants'][0]['id']
+try:
+    r = requests.get(f"{BASE}/variants/{vid}.json", timeout=5, headers=HEADERS)
+    print(f"Status: {r.status_code}")
+    if r.ok:
+        vd = r.json()
+        # Look for available field anywhere
+        flat = json.dumps(vd)
+        print(f"Contains 'available': {'available' in flat}")
+        print(f"Contains 'inventory': {'inventory' in flat}")
+        print(f"Full response ({len(flat)} chars): {flat[:500]}")
+except Exception as e:
+    print(f"Error: {e}")
+
+# Test 4: Cart add test (check if variant is purchasable)
+print()
+print("=== TEST 4: cart availability check ===")
+for v in data['variants'][:5]:
+    vid = v['id']
+    title = v.get('option1', '?')
+    try:
+        r = requests.post(f"{BASE}/cart/add.js",
+            json={"id": vid, "quantity": 1},
+            headers={**HEADERS, "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest"},
+            timeout=5)
+        available = r.status_code == 200
+        print(f"  Size {title}: {r.status_code} -> {'IN STOCK' if available else 'OUT OF STOCK'}")
+    except Exception as e:
+        print(f"  Size {title}: Error - {e}")
