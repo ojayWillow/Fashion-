@@ -3,6 +3,7 @@
 Run with:
     cd backend && uvicorn app:app --reload --port 8000
 """
+import sys
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -28,19 +29,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+# Resolve frontend directory (works from both backend/ and project root)
+FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend")
+print(f"[FASHION-] Frontend directory: {FRONTEND_DIR}")
+print(f"[FASHION-] Frontend exists: {FRONTEND_DIR.exists()}")
 
 
 @app.on_event("startup")
 def startup():
     init_db()
+    print("[FASHION-] Server ready! Open http://127.0.0.1:8000 in your browser.")
 
 
 # --- Stores ---
 
 @app.get("/api/stores", response_model=list[StoreOut])
 def list_stores():
-    """List all configured stores."""
     conn = get_db()
     rows = conn.execute("SELECT * FROM stores").fetchall()
     conn.close()
@@ -57,7 +61,6 @@ def list_products(
     min_discount: Optional[int] = None,
     sort: str = Query("newest", enum=["newest", "price_asc", "price_desc", "discount", "total_cost"]),
 ):
-    """Get catalog of all curated products with optional filters."""
     conn = get_db()
     filters = {}
     if brand:
@@ -71,7 +74,6 @@ def list_products(
 
     products = get_all_products(conn, filters)
 
-    # Attach main image to each product
     for p in products:
         img = conn.execute(
             "SELECT image_url FROM product_images WHERE product_id = ? ORDER BY position LIMIT 1",
@@ -81,7 +83,6 @@ def list_products(
 
     conn.close()
 
-    # Sort
     if sort == "price_asc":
         products.sort(key=lambda p: p["sale_price"])
     elif sort == "price_desc":
@@ -96,7 +97,6 @@ def list_products(
 
 @app.get("/api/products/{slug}")
 def get_product(slug: str):
-    """Get full product detail by slug."""
     conn = get_db()
     product = get_product_by_slug(conn, slug)
     conn.close()
@@ -109,19 +109,16 @@ def get_product(slug: str):
 
 @app.post("/api/products/shopify")
 def add_shopify_product(input: ShopifyFetchInput):
-    """Auto-fetch and add a product from a Shopify store URL."""
     try:
         product_data = fetch_shopify_product(input.product_url)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to fetch product: {e}")
 
     conn = get_db()
-
-    # Find store by base URL or use provided store_id
     store = get_store_by_platform(conn, product_data["_base_url"])
     store_id = store["id"] if store else input.store_id
-
     product_data["store_id"] = store_id
+
     try:
         product_id = insert_product(conn, product_data)
         insert_images(conn, product_id, product_data["images"])
@@ -138,7 +135,6 @@ def add_shopify_product(input: ShopifyFetchInput):
 
 @app.post("/api/products/manual")
 def add_manual_product(input: ManualProductInput):
-    """Manually add a product (for non-Shopify stores like END Clothing)."""
     try:
         product_data = build_manual_product(input.model_dump())
     except ValueError as e:
@@ -162,7 +158,6 @@ def add_manual_product(input: ManualProductInput):
 
 @app.get("/api/brands")
 def list_brands():
-    """Get list of all brands in the catalog."""
     conn = get_db()
     rows = conn.execute(
         "SELECT DISTINCT brand FROM products WHERE in_stock = 1 ORDER BY brand"
@@ -172,20 +167,33 @@ def list_brands():
 
 
 # --- Serve Frontend ---
-# Mount static files (CSS, JS) and serve HTML pages
 
-if FRONTEND_DIR.exists():
-    app.mount("/css", StaticFiles(directory=str(FRONTEND_DIR / "css")), name="css")
-    app.mount("/js", StaticFiles(directory=str(FRONTEND_DIR / "js")), name="js")
+try:
+    css_dir = FRONTEND_DIR / "css"
+    js_dir = FRONTEND_DIR / "js"
 
-    @app.get("/")
-    def serve_index():
-        return FileResponse(str(FRONTEND_DIR / "index.html"))
+    if css_dir.exists() and js_dir.exists():
+        app.mount("/css", StaticFiles(directory=str(css_dir)), name="css")
+        app.mount("/js", StaticFiles(directory=str(js_dir)), name="js")
 
-    @app.get("/product")
-    def serve_product_page():
-        return FileResponse(str(FRONTEND_DIR / "product.html"))
+        @app.get("/")
+        def serve_index():
+            return FileResponse(str(FRONTEND_DIR / "index.html"))
 
-    @app.get("/admin")
-    def serve_admin_page():
-        return FileResponse(str(FRONTEND_DIR / "admin.html"))
+        @app.get("/product")
+        def serve_product_page():
+            return FileResponse(str(FRONTEND_DIR / "product.html"))
+
+        @app.get("/admin")
+        def serve_admin_page():
+            return FileResponse(str(FRONTEND_DIR / "admin.html"))
+
+        print(f"[FASHION-] Frontend mounted from {FRONTEND_DIR}")
+    else:
+        print(f"[FASHION-] WARNING: Frontend dirs not found at {FRONTEND_DIR}")
+        print(f"[FASHION-]   css exists: {css_dir.exists()}")
+        print(f"[FASHION-]   js exists: {js_dir.exists()}")
+        print(f"[FASHION-]   API-only mode — use http://127.0.0.1:8000/docs")
+except Exception as e:
+    print(f"[FASHION-] ERROR mounting frontend: {e}")
+    print(f"[FASHION-]   API-only mode — use http://127.0.0.1:8000/docs")
