@@ -37,10 +37,6 @@ def fetch_shopify_product(product_url: str) -> dict:
     if not variants:
         raise ValueError(f"Product has no variants: {product_url}")
 
-    # Step 2: Get real-time variant availability
-    variant_ids = [str(v["id"]) for v in variants]
-    availability = _fetch_variant_availability(base_url, variant_ids)
-
     # Pricing
     original_price = None
     sale_price = None
@@ -58,13 +54,12 @@ def fetch_shopify_product(product_url: str) -> dict:
 
     discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
 
-    # Step 3: Get ALL images — JSON + HTML scrape
+    # Step 2: Scrape the actual product page for images AND availability
+    page_data = _scrape_product_page(product_url)
+
+    # Build images: JSON images + page images
     json_image_urls = [img["src"] for img in data.get("images", [])]
-
-    # Scrape the actual product page for more images
-    page_image_urls = _scrape_page_images(product_url)
-
-    # Merge and deduplicate
+    page_image_urls = page_data.get("images", [])
     all_image_urls = _merge_images(json_image_urls, page_image_urls)
 
     print(f"[FASHION-] Images: {len(json_image_urls)} from JSON, {len(page_image_urls)} from page, {len(all_image_urls)} total")
@@ -76,15 +71,19 @@ def fetch_shopify_product(product_url: str) -> dict:
             "alt": f"{data['title']} - image {i + 1}",
         })
 
-    # Step 4: Build sizes with real availability
+    # Step 3: Build sizes with page availability data
+    page_availability = page_data.get("availability", {})
+
     sizes = []
     for v in variants:
         vid = str(v["id"])
-        # Check real-time availability first, fall back to JSON
-        if availability:
-            in_stock = availability.get(vid, False)
-        else:
+        # Priority: page HTML data > JSON available field > default False
+        if page_availability:
+            in_stock = page_availability.get(vid, False)
+        elif v.get("available") is not None:
             in_stock = v.get("available", False)
+        else:
+            in_stock = False
 
         sizes.append({
             "label": v.get("option1", v.get("title", "?")),
@@ -113,144 +112,74 @@ def fetch_shopify_product(product_url: str) -> dict:
     }
 
 
-def _fetch_variant_availability(base_url: str, variant_ids: list[str]) -> dict:
-    """Fetch real-time variant availability using Shopify's storefront endpoints.
+def _scrape_product_page(product_url: str) -> dict:
+    """Scrape the product page HTML for images and variant availability.
 
-    Tries multiple methods:
-    1. The variants.json endpoint (batch check)
-    2. Individual variant availability check
-    3. The product page HTML for embedded JSON data
+    Returns dict with:
+        images: list of image URLs
+        availability: dict of variant_id -> bool
     """
-    availability = {}
+    result = {"images": [], "availability": {}}
 
-    # Method 1: Try the product page for embedded variant data
-    # Shopify embeds variant availability in a JS variable on the product page
-    # This is the most reliable method for stores like AFEW
-    # (already fetched in _scrape_page_images, but we do a targeted extraction here)
-
-    # Method 2: Try variants.json endpoint
-    try:
-        # Shopify has an undocumented endpoint for checking variant availability
-        # Check each variant individually via the cart/add endpoint simulation
-        for vid in variant_ids:
-            try:
-                check_url = f"{base_url}/variants/{vid}.json"
-                resp = SESSION.get(check_url, timeout=5)
-                if resp.ok:
-                    vdata = resp.json().get("variant", {})
-                    availability[vid] = vdata.get("available", False)
-            except Exception:
-                continue
-
-        if availability:
-            return availability
-    except Exception:
-        pass
-
-    return availability
-
-
-def _scrape_page_images(product_url: str) -> list[str]:
-    """Scrape the actual product page for all product images.
-
-    Shopify stores render additional images on the page that aren't
-    always in the products.json endpoint. We look for:
-    1. Shopify CDN URLs in the HTML
-    2. JSON-LD structured data
-    3. Embedded product JSON in script tags
-    """
     try:
         resp = SESSION.get(product_url, timeout=15)
         resp.raise_for_status()
         html = resp.text
     except Exception as e:
         print(f"[FASHION-] Could not scrape page: {e}")
-        return []
+        return result
 
-    images = []
-    seen = set()
+    # === IMAGES ===
+    seen_images = set()
 
-    # Method 1: Find all Shopify CDN product image URLs
-    # Match various CDN patterns including //cdn.shopify.com and https://cdn.shopify.com
-    cdn_patterns = [
-        r'(?:https?:)?//cdn\.shopify\.com/s/files/[^"\s\)\}\>\'\']+\.(?:jpg|jpeg|png|webp)',
-        r'(?:https?:)?//[\w.-]*\.shopifycdn\.com/[^"\s\)\}\>\'\']+\.(?:jpg|jpeg|png|webp)',
-    ]
+    # Find ALL Shopify CDN image URLs (not just /products/ path)
+    cdn_pattern = r'(?:https?:)?//cdn\.shopify\.com/s/files/[^"\s)}\'><]+\.(?:jpg|jpeg|png|webp)'
+    for match in re.findall(cdn_pattern, html, re.IGNORECASE):
+        url = match if match.startswith('http') else 'https:' + match
+        clean_url = url.split('?')[0]
 
-    for pattern in cdn_patterns:
-        for match in re.findall(pattern, html, re.IGNORECASE):
-            url = match if match.startswith('http') else 'https:' + match
-            # Only keep product images, not theme/icon images
-            if '/products/' in url or '/product-images/' in url:
-                clean = _normalize_image_url(url)
-                if clean not in seen:
-                    seen.add(clean)
-                    images.append(url.split('?')[0])  # Remove query params but keep size
+        # Filter out tiny icons/logos by checking for common non-product patterns
+        skip_patterns = ['/icons/', '/logo', '/badge', '/flag', '/payment', '/social',
+                        '/favicon', '/arrow', '/cart', '/search', '/close', '/menu',
+                        '/check', '/star', '/heart', '/footer', '/header', '/banner']
+        if any(p in clean_url.lower() for p in skip_patterns):
+            continue
 
-    # Method 2: Look for embedded product JSON in script tags
-    # Many Shopify themes embed the full product object in a script tag
-    try:
-        # Pattern: var product = {...} or window.product = {...}
-        json_patterns = [
-            r'var\s+(?:meta|product)\s*=\s*(\{.*?\});',
-            r'"product"\s*:\s*(\{"id".*?\})(?:,|\s*\})',
-            r'product:\s*(\{"id".*?\})(?:,|\s*\})',
-        ]
-        for pattern in json_patterns:
-            for match in re.findall(pattern, html, re.DOTALL):
-                try:
-                    pdata = _json.loads(match)
-                    # Could be nested under "product" key
-                    if "product" in pdata:
-                        pdata = pdata["product"]
-                    for img in pdata.get("images", pdata.get("media", [])):
-                        img_url = None
-                        if isinstance(img, dict):
-                            img_url = img.get("src") or img.get("url")
-                        elif isinstance(img, str):
-                            img_url = img
-                        if img_url:
-                            if img_url.startswith('//'):
-                                img_url = 'https:' + img_url
-                            clean = _normalize_image_url(img_url)
-                            if clean not in seen and 'cdn.shopify.com' in img_url:
-                                seen.add(clean)
-                                images.append(img_url.split('?')[0])
-                except (_json.JSONDecodeError, TypeError, KeyError):
-                    continue
-    except Exception:
-        pass
+        normalized = _normalize_image_url(clean_url)
+        if normalized not in seen_images:
+            seen_images.add(normalized)
+            result["images"].append(clean_url)
 
-    # Method 3: JSON-LD structured data
-    try:
-        ld_pattern = r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>'
-        for match in re.findall(ld_pattern, html, re.DOTALL):
-            try:
-                ld_data = _json.loads(match)
-                if isinstance(ld_data, dict) and ld_data.get("@type") == "Product":
-                    ld_images = ld_data.get("image", [])
-                    if isinstance(ld_images, str):
-                        ld_images = [ld_images]
-                    for img_url in ld_images:
-                        if isinstance(img_url, str) and 'cdn.shopify.com' in img_url:
-                            clean = _normalize_image_url(img_url)
-                            if clean not in seen:
-                                seen.add(clean)
-                                images.append(img_url.split('?')[0])
-            except (_json.JSONDecodeError, TypeError):
-                continue
-    except Exception:
-        pass
+    # === AVAILABILITY ===
+    # Look for variant availability in embedded script tags
+    # Shopify themes typically embed product data in JS
+    script_pattern = r'<script[^>]*>(.*?)</script>'
+    for script_content in re.findall(script_pattern, html, re.DOTALL):
+        if '"available"' not in script_content or '"variants"' not in script_content:
+            continue
 
-    print(f"[FASHION-] Scraped {len(images)} images from product page")
-    return images
+        # Try to extract variant data from various common formats
+        # Format 1: "variants":[{..."id":123,"available":true...},...]
+        variant_pattern = r'"id"\s*:\s*(\d+).*?"available"\s*:\s*(true|false)'
+        for vid, avail in re.findall(variant_pattern, script_content):
+            result["availability"][vid] = avail == "true"
+
+        # Format 2: Sometimes available comes before id
+        variant_pattern2 = r'"available"\s*:\s*(true|false).*?"id"\s*:\s*(\d+)'
+        for avail, vid in re.findall(variant_pattern2, script_content):
+            if vid not in result["availability"]:
+                result["availability"][vid] = avail == "true"
+
+        if result["availability"]:
+            break
+
+    avail_count = sum(1 for v in result["availability"].values() if v)
+    print(f"[FASHION-] Scraped {len(result['images'])} images, {avail_count}/{len(result['availability'])} available variants from page")
+
+    return result
 
 
 def _normalize_image_url(url: str) -> str:
-    """Normalize a Shopify CDN URL for deduplication.
-
-    Removes size suffixes and query params to compare base images.
-    """
     url = url.split('?')[0]
     url = re.sub(r'_(pico|icon|thumb|small|compact|medium|large|grande|original|master|\d+x\d*|\d*x\d+)\.', '.', url)
     if url.startswith('//'):
@@ -259,7 +188,6 @@ def _normalize_image_url(url: str) -> str:
 
 
 def _merge_images(json_images: list[str], page_images: list[str]) -> list[str]:
-    """Merge images from JSON API and page scraping, removing duplicates."""
     seen = set()
     result = []
 
@@ -294,8 +222,8 @@ if __name__ == "__main__":
     print(f"\nName: {result['name']}")
     print(f"Images found: {len(result['images'])}")
     for i, img in enumerate(result['images']):
-        print(f"  {i+1}. {img['url'][:100]}")
-    print(f"\nSizes: {len(result['sizes'])}")
+        print(f"  {i+1}. {img['url'][:120]}")
+    print(f"\nSizes:")
     for s in result['sizes']:
-        status = '\u2705' if s['in_stock'] else '\u274c'
-        print(f"  {status} {s['label']}")
+        status = 'YES' if s['in_stock'] else 'NO'
+        print(f"  [{status}] {s['label']}")
