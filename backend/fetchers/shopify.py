@@ -16,43 +16,82 @@ SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 })
 
+# Category detection keywords
+_TODDLER_WORDS = ['toddler', 'infant', 'baby', ' td ', ' td', 'td ', 'crib']
+_KIDS_WORDS = ['kids', 'junior', 'youth', 'gs ', ' gs', 'grade school', 'big kid', 'little kid']
+_CLOTHING_WORDS = ['hoodie', 'jacket', 'shirt', 't-shirt', 'tee', 'pants', 'jogger', 'shorts', 'sweater', 'crewneck', 'crew neck', 'pullover', 'vest', 'coat', 'parka', 'windbreaker', 'tracksuit', 'sweatshirt', 'sweatpant', 'jersey', 'polo', 'cardigan', 'fleece', 'puffer', 'anorak', 'dress', 'skirt', 'legging', 'trouser', 'cargo', 'denim', 'jeans', 'tank top', 'longsleeve', 'apparel', 'clothing']
+_ACCESSORY_WORDS = ['cap', 'hat', 'beanie', 'bag', 'backpack', 'wallet', 'belt', 'sock', 'scarf', 'glove', 'sunglasses', 'watch', 'keychain', 'headband', 'wristband', 'accessory', 'accessories', 'case', 'pouch', 'tote', 'duffle']
+_SNEAKER_WORDS = ['sneaker', 'shoe', 'footwear', 'runner', 'trainer', 'boot', 'slide', 'sandal', 'clog', 'mule', 'slipper', 'foam', 'dunk', 'jordan', 'air max', 'gel-', 'chuck', '550', '530', '2002r', '990', '1906', 'ultraboost', 'ozweego', 'forum', 'samba', 'gazelle', 'campus', 'old skool', 'sk8', 'classic leather']
+
+
+def _detect_category(name: str, product_type: str, tags: list) -> str:
+    """Auto-detect product category from Shopify metadata."""
+    text = f" {name} {product_type} {' '.join(tags)} ".lower()
+
+    if any(w in text for w in _TODDLER_WORDS):
+        return 'toddler'
+    if any(w in text for w in _KIDS_WORDS):
+        return 'kids'
+
+    ptype = product_type.lower().strip()
+    if ptype in ['footwear', 'shoes', 'sneakers']:
+        return 'sneakers'
+    if ptype in ['apparel', 'clothing', 'tops', 'bottoms', 'outerwear']:
+        return 'clothing'
+    if ptype in ['accessories', 'bags', 'hats', 'socks']:
+        return 'accessories'
+
+    for tag in tags:
+        tl = tag.lower()
+        if tl.startswith('type:'):
+            val = tl.split(':', 1)[1].strip()
+            if val in ['footwear', 'shoes', 'sneakers', 'sneaker']:
+                return 'sneakers'
+            if val in ['apparel', 'clothing', 'tops', 'bottoms']:
+                return 'clothing'
+            if val in ['accessories', 'accessory']:
+                return 'accessories'
+
+    if any(w in text for w in _ACCESSORY_WORDS):
+        return 'accessories'
+    if any(w in text for w in _CLOTHING_WORDS):
+        return 'clothing'
+    if any(w in text for w in _SNEAKER_WORDS):
+        return 'sneakers'
+
+    return 'sneakers'
+
 
 def _request_with_retry(url: str, max_retries: int = 3) -> requests.Response:
-    """Make a GET request with retry on 429 rate limit."""
     for attempt in range(max_retries):
         resp = SESSION.get(url, timeout=15)
         if resp.status_code == 429:
-            wait = (attempt + 1) * 3  # 3s, 6s, 9s
+            wait = (attempt + 1) * 3
             print(f"[FASHION-] Rate limited, waiting {wait}s... (attempt {attempt + 1}/{max_retries})")
             time.sleep(wait)
             continue
         resp.raise_for_status()
         return resp
-    resp.raise_for_status()  # raise the last 429
+    resp.raise_for_status()
     return resp
 
 
 def fetch_shopify_product(product_url: str) -> dict:
-    """Fetch all product data from a Shopify product URL.
-
-    Returns a dict with: name, brand, slug, sku, colorway, prices,
-    discount_pct, description, images, sizes (with availability), in_stock.
-    """
     parsed = urlparse(product_url)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
     handle = parsed.path.rstrip("/").split("/")[-1]
     if not handle:
         raise ValueError(f"Could not extract product handle from URL: {product_url}")
 
-    # === Fetch .json (main data source) ===
+    # Fetch .json (main data)
     json_url = f"{base_url}/products/{handle}.json"
     resp = _request_with_retry(json_url)
     json_data = resp.json()["product"]
 
-    # === Fetch .js (availability source) ===
+    # Fetch .js (availability)
     js_data = None
     try:
-        time.sleep(0.5)  # small delay to avoid rate limit
+        time.sleep(0.5)
         js_url = f"{base_url}/products/{handle}.js"
         js_resp = _request_with_retry(js_url)
         js_data = js_resp.json()
@@ -60,13 +99,21 @@ def fetch_shopify_product(product_url: str) -> dict:
         print(f"[FASHION-] Could not fetch .js endpoint: {e}")
         print(f"[FASHION-] Falling back to .json availability (may show null)")
 
-    # === Extract basic info ===
+    # Basic info
     colorway = _extract_tag(json_data.get("tags", []), "color")
     json_variants = json_data.get("variants", [])
     if not json_variants:
         raise ValueError(f"Product has no variants: {product_url}")
 
-    # === Pricing ===
+    # Auto-detect category
+    raw_tags = json_data.get("tags", [])
+    if isinstance(raw_tags, str):
+        raw_tags = [t.strip() for t in raw_tags.split(",")]
+    product_type = json_data.get("product_type", "")
+    category = _detect_category(json_data["title"], product_type, raw_tags)
+    print(f"[FASHION-] Category: {category} (type='{product_type}')")
+
+    # Pricing
     original_price = None
     sale_price = None
     for v in json_variants:
@@ -83,8 +130,7 @@ def fetch_shopify_product(product_url: str) -> dict:
 
     discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
 
-    # === Images ===
-    # Combine from .json images + .js media (if available)
+    # Images
     all_image_urls = []
     seen = set()
 
@@ -96,7 +142,6 @@ def fetch_shopify_product(product_url: str) -> dict:
                 seen.add(norm)
                 all_image_urls.append(url)
 
-    # .js media often has more images
     if js_data:
         for img in js_data.get("images", []):
             url = img if isinstance(img, str) else img.get("src", "")
@@ -124,8 +169,7 @@ def fetch_shopify_product(product_url: str) -> dict:
 
     print(f"[FASHION-] Images: {len(all_image_urls)} found")
 
-    # === Sizes & availability ===
-    # Build availability map from .js (has true/false vs .json's null)
+    # Sizes & availability
     js_avail = {}
     if js_data:
         for v in js_data.get("variants", []):
@@ -157,6 +201,7 @@ def fetch_shopify_product(product_url: str) -> dict:
         "slug": handle,
         "sku": json_variants[0].get("sku"),
         "colorway": colorway,
+        "category": category,
         "original_price": original_price,
         "sale_price": sale_price,
         "discount_pct": discount_pct,
@@ -165,17 +210,12 @@ def fetch_shopify_product(product_url: str) -> dict:
         "images": images,
         "sizes": sizes,
         "in_stock": any_in_stock,
-        "_raw_tags": json_data.get("tags", []),
+        "_raw_tags": raw_tags,
         "_base_url": base_url,
     }
 
 
 def check_product_still_online(product_url: str) -> dict:
-    """Quick check if a product is still live and has stock.
-
-    Returns: {"online": bool, "in_stock": bool, "sizes_available": int, "sizes_total": int}
-    Used by the stock checker to update the database periodically.
-    """
     parsed = urlparse(product_url)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
     handle = parsed.path.rstrip("/").split("/")[-1]
@@ -218,26 +258,3 @@ def _extract_tag(tags, prefix: str) -> str | None:
         if tag.lower().startswith(f"{prefix}:"):
             values.append(tag.split(":", 1)[1].strip())
     return " / ".join(values) if values else None
-
-
-if __name__ == "__main__":
-    import sys
-    url = sys.argv[1] if len(sys.argv) > 1 else "https://en.afew-store.com/products/asics-gel-kayano-14-white-pure-silver-1201b076-100"
-
-    print(f"Fetching: {url}\n")
-    result = fetch_shopify_product(url)
-    print(f"\nName: {result['name']}")
-    print(f"Brand: {result['brand']}")
-    print(f"Price: \u20ac{result['sale_price']} (was \u20ac{result['original_price']}, -{result['discount_pct']}%)")
-    print(f"In stock: {result['in_stock']}")
-    print(f"Images: {len(result['images'])}")
-    for i, img in enumerate(result['images']):
-        print(f"  {i+1}. {img['url'][:120]}")
-    print(f"\nSizes ({sum(1 for s in result['sizes'] if s['in_stock'])}/{len(result['sizes'])} available):")
-    for s in result['sizes']:
-        status = '\u2705' if s['in_stock'] else '\u274c'
-        print(f"  {status} {s['label']}")
-
-    print(f"\n--- Online check ---")
-    status = check_product_still_online(url)
-    print(f"Online: {status['online']}, In stock: {status['in_stock']}, Sizes: {status['sizes_available']}/{status['sizes_total']}")
