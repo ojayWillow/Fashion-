@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FASHION- | Admin</title>
+    <link rel="stylesheet" href="css/style.css">
+    <style>
+        .admin-container { max-width: 700px; margin: 0 auto; }
+        .form-section { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; margin-bottom: 24px; }
+        .form-section h2 { font-size: 1.1rem; margin-bottom: 16px; color: var(--accent); }
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+        .form-input { width: 100%; background: var(--bg-secondary); border: 1px solid var(--border); color: var(--text-primary); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 0.95rem; font-family: var(--font-main); }
+        .form-input:focus { border-color: var(--accent); outline: none; }
+        textarea.form-input { min-height: 100px; resize: vertical; }
+        .form-hint { font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; }
+        .tab-row { display: flex; gap: 0; margin-bottom: 24px; }
+        .tab-btn { flex: 1; padding: 12px; background: var(--bg-card); border: 1px solid var(--border); color: var(--text-secondary); font-family: var(--font-main); font-size: 0.95rem; cursor: pointer; transition: all 0.2s; }
+        .tab-btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
+        .tab-btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+        .tab-btn.active { background: var(--accent); color: var(--bg-primary); font-weight: 700; border-color: var(--accent); }
+        .submit-btn { width: 100%; padding: 14px; background: var(--accent); color: var(--bg-primary); border: none; border-radius: var(--radius); font-size: 1.05rem; font-weight: 700; font-family: var(--font-main); cursor: pointer; text-transform: uppercase; letter-spacing: 0.05em; transition: all 0.2s; }
+        .submit-btn:hover { background: #33ebff; box-shadow: 0 0 24px var(--accent-glow); }
+        .result { margin-top: 16px; padding: 16px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 0.85rem; }
+        .result-success { background: rgba(0,255,136,0.1); border: 1px solid var(--success); color: var(--success); }
+        .result-error { background: var(--sale-glow); border: 1px solid var(--sale); color: var(--sale); }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="header-inner">
+            <a href="/" class="logo">FASHION<span class="logo-accent">-</span></a>
+            <span style="color: var(--warning); font-weight: 600;">ADMIN</span>
+        </div>
+    </header>
+
+    <main class="container admin-container">
+        <h1 style="font-size: 1.5rem; margin-bottom: 24px;">Add Product</h1>
+
+        <div class="tab-row">
+            <button class="tab-btn active" data-tab="shopify">Shopify (Auto-Fetch)</button>
+            <button class="tab-btn" data-tab="manual">Manual Entry</button>
+        </div>
+
+        <!-- Shopify Tab -->
+        <form id="shopify-form">
+            <div class="form-section">
+                <h2>Paste AFEW Store URL</h2>
+                <div class="form-group">
+                    <label>Product URL</label>
+                    <input type="url" class="form-input" id="shopify-url" placeholder="https://en.afew-store.com/products/..." required>
+                    <div class="form-hint">The system will fetch all data automatically from the Shopify JSON API</div>
+                </div>
+                <div class="form-group">
+                    <label><input type="checkbox" id="shopify-featured"> Featured (show on homepage)</label>
+                </div>
+            </div>
+            <button type="submit" class="submit-btn">Fetch & Add Product</button>
+        </form>
+
+        <!-- Manual Tab -->
+        <form id="manual-form" class="hidden">
+            <div class="form-section">
+                <h2>Product Info</h2>
+                <div class="form-group">
+                    <label>Name *</label>
+                    <input type="text" class="form-input" id="manual-name" placeholder="Nike Air Max 1 SC" required>
+                </div>
+                <div class="form-group">
+                    <label>Brand *</label>
+                    <input type="text" class="form-input" id="manual-brand" placeholder="Nike">
+                </div>
+                <div class="form-group">
+                    <label>Colorway</label>
+                    <input type="text" class="form-input" id="manual-colorway" placeholder="Photon Dust / White">
+                </div>
+                <div class="form-group">
+                    <label>SKU</label>
+                    <input type="text" class="form-input" id="manual-sku" placeholder="FB9660-002">
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h2>Pricing</h2>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                    <div class="form-group">
+                        <label>Original Price (€)</label>
+                        <input type="number" step="0.01" class="form-input" id="manual-original-price" placeholder="149.99">
+                    </div>
+                    <div class="form-group">
+                        <label>Sale Price (€) *</label>
+                        <input type="number" step="0.01" class="form-input" id="manual-sale-price" placeholder="104.99" required>
+                    </div>
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h2>Links & Media</h2>
+                <div class="form-group">
+                    <label>Product URL *</label>
+                    <input type="url" class="form-input" id="manual-url" placeholder="https://www.endclothing.com/eu/..." required>
+                </div>
+                <div class="form-group">
+                    <label>Image URLs (one per line)</label>
+                    <textarea class="form-input" id="manual-images" placeholder="https://...jpg&#10;https://...jpg"></textarea>
+                </div>
+            </div>
+
+            <div class="form-section">
+                <h2>Sizes & Details</h2>
+                <div class="form-group">
+                    <label>Available Sizes (comma-separated)</label>
+                    <input type="text" class="form-input" id="manual-sizes" placeholder="EU 39, EU 40, EU 41, EU 42, EU 43, EU 44">
+                </div>
+                <div class="form-group">
+                    <label>Description</label>
+                    <textarea class="form-input" id="manual-description" placeholder="Product description..."></textarea>
+                </div>
+                <div class="form-group">
+                    <label>Store</label>
+                    <select class="form-input" id="manual-store">
+                        <option value="2">END Clothing (€9.99 shipping)</option>
+                        <option value="1">AFEW Store (€7.99 shipping)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label><input type="checkbox" id="manual-featured"> Featured</label>
+                </div>
+            </div>
+            <button type="submit" class="submit-btn">Add Product</button>
+        </form>
+
+        <div id="result" class="hidden"></div>
+    </main>
+
+    <script>
+        const API_BASE = window.location.hostname === 'localhost' ? 'http://localhost:8000' : '';
+        const resultDiv = document.getElementById('result');
+
+        // Tab switching
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                const tab = btn.dataset.tab;
+                document.getElementById('shopify-form').classList.toggle('hidden', tab !== 'shopify');
+                document.getElementById('manual-form').classList.toggle('hidden', tab !== 'manual');
+                resultDiv.classList.add('hidden');
+            });
+        });
+
+        // Shopify form
+        document.getElementById('shopify-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const body = {
+                product_url: document.getElementById('shopify-url').value,
+                featured: document.getElementById('shopify-featured').checked,
+            };
+            await submitProduct('/api/products/shopify', body);
+        });
+
+        // Manual form
+        document.getElementById('manual-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const images = document.getElementById('manual-images').value
+                .split('\n').map(s => s.trim()).filter(Boolean);
+            const sizes = document.getElementById('manual-sizes').value
+                .split(',').map(s => s.trim()).filter(Boolean);
+
+            const body = {
+                name: document.getElementById('manual-name').value,
+                brand: document.getElementById('manual-brand').value,
+                colorway: document.getElementById('manual-colorway').value || null,
+                sku: document.getElementById('manual-sku').value || null,
+                original_price: parseFloat(document.getElementById('manual-original-price').value) || null,
+                sale_price: parseFloat(document.getElementById('manual-sale-price').value),
+                product_url: document.getElementById('manual-url').value,
+                images: images,
+                sizes: sizes,
+                description: document.getElementById('manual-description').value || '',
+                store_id: parseInt(document.getElementById('manual-store').value),
+                featured: document.getElementById('manual-featured').checked,
+            };
+            await submitProduct('/api/products/manual', body);
+        });
+
+        async function submitProduct(endpoint, body) {
+            resultDiv.classList.add('hidden');
+            try {
+                const res = await fetch(`${API_BASE}${endpoint}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    resultDiv.className = 'result result-success';
+                    resultDiv.textContent = `\u2705 Product added! Slug: ${data.slug} (ID: ${data.id})`;
+                } else {
+                    resultDiv.className = 'result result-error';
+                    resultDiv.textContent = `\u274c Error: ${data.detail || JSON.stringify(data)}`;
+                }
+            } catch (e) {
+                resultDiv.className = 'result result-error';
+                resultDiv.textContent = `\u274c Network error: ${e.message}`;
+            }
+            resultDiv.classList.remove('hidden');
+        }
+    </script>
+</body>
+</html>
