@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FASHION- | Curated Streetwear Deals</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <header class="header">
+        <div class="header-inner">
+            <a href="/" class="logo">FASHION<span class="logo-accent">-</span></a>
+            <p class="tagline">Curated deals · Limited stock · Act fast</p>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- Filters -->
+        <section class="filters">
+            <div class="filter-row">
+                <select id="filter-brand" class="filter-select">
+                    <option value="">All Brands</option>
+                </select>
+                <select id="filter-store" class="filter-select">
+                    <option value="">All Stores</option>
+                </select>
+                <select id="filter-discount" class="filter-select">
+                    <option value="">Min Discount</option>
+                    <option value="10">10%+</option>
+                    <option value="20">20%+</option>
+                    <option value="30">30%+</option>
+                    <option value="40">40%+</option>
+                    <option value="50">50%+</option>
+                </select>
+                <select id="sort" class="filter-select">
+                    <option value="newest">Newest</option>
+                    <option value="discount">Biggest Discount</option>
+                    <option value="price_asc">Price: Low → High</option>
+                    <option value="price_desc">Price: High → Low</option>
+                    <option value="total_cost">Total Cost (incl. shipping)</option>
+                </select>
+            </div>
+        </section>
+
+        <!-- Product Grid -->
+        <section id="product-grid" class="product-grid">
+            <div class="loading">Loading deals…</div>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <p>FASHION- · Prices & stock from retailers · We don’t sell directly</p>
+    </footer>
+
+    <script src="js/catalog.js"></script>
+</body>
+</html>
