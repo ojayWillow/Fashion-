@@ -130,6 +130,15 @@ function renderCard(p) {
         ? `<img src="${p.image_url}" alt="${p.name}" loading="lazy">`
         : '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted)">No image</div>';
 
+    // Render size pills (show max 8, then "+N more")
+    let sizesHtml = '';
+    if (p.sizes && p.sizes.length) {
+        const maxShow = 8;
+        const visible = p.sizes.slice(0, maxShow);
+        const remaining = p.sizes.length - maxShow;
+        sizesHtml = `<div class="card-sizes">${visible.map(s => `<span class="size-pill">${esc(s)}</span>`).join('')}${remaining > 0 ? `<span class="size-pill size-pill-more">+${remaining}</span>` : ''}</div>`;
+    }
+
     return `
         <div class="product-card ${p.in_stock ? '' : 'sold-out'}" data-slug="${p.slug}">
             <div class="card-image-wrap">
@@ -140,6 +149,7 @@ function renderCard(p) {
                 <div class="card-brand">${catIcon} ${esc(p.brand)}</div>
                 <div class="card-name">${esc(p.name)}</div>
                 ${p.colorway ? `<div class="card-colorway">${esc(p.colorway)}</div>` : ''}
+                ${sizesHtml}
                 <div class="card-prices">
                     <span class="price-sale">\u20ac${p.sale_price.toFixed(2)}</span>
                     ${p.original_price > p.sale_price
