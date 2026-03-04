@@ -69,6 +69,13 @@ def list_products(
         ).fetchone()
         p["image_url"] = img["image_url"] if img else None
 
+        # Attach in-stock sizes to each product card
+        sizes = conn.execute(
+            "SELECT size_label FROM product_sizes WHERE product_id = ? AND in_stock = 1 ORDER BY size_label",
+            (p["id"],),
+        ).fetchall()
+        p["sizes"] = [s["size_label"] for s in sizes]
+
     conn.close()
 
     if sort == "price_asc":

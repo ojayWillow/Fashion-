@@ -235,6 +235,35 @@ body {
     margin-bottom: 12px;
 }
 
+/* ===== Size Pills on Cards ===== */
+
+.card-sizes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 10px;
+}
+
+.size-pill {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-size: 0.68rem;
+    font-family: var(--font-mono);
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+.size-pill-more {
+    background: var(--accent-glow);
+    border-color: var(--accent);
+    color: var(--accent);
+    font-weight: 600;
+}
+
+/* ===== Card Prices & Store ===== */
+
 .card-prices {
     display: flex;
     align-items: baseline;
@@ -565,5 +594,10 @@ body {
         flex-direction: column;
         gap: 4px;
         text-align: center;
+    }
+
+    .size-pill {
+        font-size: 0.6rem;
+        padding: 1px 5px;
     }
 }
