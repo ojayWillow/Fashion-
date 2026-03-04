@@ -1,53 +1,96 @@
-# 🔥 Fashion- | Streetwear Sales Aggregator
+# FASHION-
 
-A curated streetwear & sneaker deals catalog targeting Latvia. Hand-pick the best sale items from EU retailers, auto-fetch product data, and display them in a futuristic, urgency-driven catalog.
+Curated streetwear deals aggregator. Tracks sale items from stores like AFEW Store and END Clothing, showing prices, sizes, stock status, and shipping costs to Latvia.
+
+## Architecture
+
+```
+frontend/          → Static HTML/CSS/JS (no framework)
+  index.html       → Catalogue grid with filters
+  product.html     → Product detail page
+  admin.html       → Add products (paste URL or manual entry)
+  css/style.css    → Dark theme styling
+  js/catalog.js    → Catalogue grid logic
+  js/product.js    → Product detail + edit/delete
+
+backend/           → Python FastAPI server
+  app.py           → API routes + static file serving
+  database.py      → SQLite connection + queries
+  schema.sql       → Database schema
+  models.py        → Pydantic request/response models
+  fetchers/
+    shopify.py     → Fetch product data from Shopify .json + .js APIs
+    manual.py      → Build product from manual input
+  migrate_categories.py → One-time script to auto-categorize existing products
+  debug_afew.py    → Debug script for testing AFEW API responses
+
+data/
+  catalog.db       → SQLite database (created on first run, gitignored)
+```
+
+## Quick Start
+
+```bash
+cd backend
+pip install fastapi uvicorn requests pydantic
+uvicorn app:app --reload --port 8000
+```
+
+Open http://localhost:8000
 
 ## How It Works
 
-1. **Find a deal** on AFEW Store, END Clothing, or another retailer
-2. **Paste the product URL** into the admin tool
-3. **System auto-fetches** all product data (name, brand, images, prices, sizes, stock)
-4. **Item appears** in the catalog on the website
-5. **Stock checker** runs periodically to mark items as sold out
+### Adding Products
+1. Go to http://localhost:8000/admin
+2. Paste a Shopify product URL (e.g., from AFEW Store)
+3. The system fetches: name, brand, images, sizes, availability, pricing
+4. Category is **auto-detected** from Shopify product type and tags
+5. Product is saved to SQLite database
 
-## Target Stores
+### Data Sources
+- **`/products/{handle}.json`** — Shopify public API for product data, images, pricing, tags
+- **`/products/{handle}.js`** — Shopify storefront API for real-time variant availability
 
-| Store | Shipping to LV | Free Shipping | Platform |
+### Category Auto-Detection
+Detects from Shopify `product_type` field, tags (e.g., `type:footwear`), and product name keywords:
+- 👟 **Sneakers** — footwear, shoes, runners, specific models (Dunk, Jordan, Gel-Kayano...)
+- 👕 **Clothing** — hoodies, jackets, shirts, pants, sweaters...
+- 🎩 **Accessories** — caps, bags, wallets, socks, scarves...
+- 🧡 **Kids** — junior, youth, grade school...
+- 👶 **Toddler** — infant, baby, toddler, crib...
+
+Category can be changed on the product detail page (pencil icon).
+
+### Catalogue Features
+- Filter by: **category**, **brand**, **size**, **store**
+- Sort by: newest, price, discount, total cost (incl. shipping)
+- Size filter updates dynamically based on selected category
+- Shipping costs per store (AFEW €7.99, END €9.99)
+
+### Product Management
+- **Edit category** — pencil icon on product detail page
+- **Delete product** — red button on product detail page
+- **PATCH /api/products/{slug}** — update category, name, brand, colorway
+- **DELETE /api/products/{slug}** — remove product
+
+## API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | /api/products | List products (with filters) |
+| GET | /api/products/{slug} | Product detail |
+| POST | /api/products/shopify | Add product by URL |
+| POST | /api/products/manual | Add product manually |
+| PATCH | /api/products/{slug} | Edit product fields |
+| DELETE | /api/products/{slug} | Delete product |
+| GET | /api/brands | List all brands |
+| GET | /api/categories | List all categories |
+| GET | /api/sizes | List available sizes |
+| GET | /api/stores | List stores |
+
+## Stores
+
+| Store | Shipping to LV | Free shipping | Platform |
 |-------|---------------|---------------|----------|
-| AFEW Store | €7.99 | From €250 | Shopify (auto-fetch) |
-| END Clothing | €9.99 | From €250 | Custom (manual entry) |
-
-## Tech Stack
-
-- **Database:** SQLite
-- **Backend:** Python + FastAPI
-- **Fetcher:** Shopify JSON API (auto) + manual entry
-- **Stock Checker:** APScheduler / cron
-- **Frontend:** HTML/CSS/JS with dark futuristic theme
-
-## Project Structure
-
-```
-backend/
-  app.py              # FastAPI main app
-  database.py          # SQLite connection + helpers
-  models.py            # Pydantic models
-  schema.sql           # Database schema
-  fetchers/
-    shopify.py         # Auto-fetch from Shopify URLs
-    manual.py          # Manual product entry
-  stock_checker.py     # Periodic availability check
-  requirements.txt
-frontend/
-  index.html           # Catalog grid
-  product.html         # Product detail page
-  css/style.css        # Dark theme
-  js/catalog.js        # Grid rendering
-  js/product.js        # Detail page rendering
-data/
-  catalog.db           # SQLite database
-```
-
-## Roadmap
-
-See [ROADMAP.md](ROADMAP.md) for the full implementation plan.
+| AFEW Store | €7.99 | €250+ | Shopify |
+| END Clothing | €9.99 | €250+ | Custom |

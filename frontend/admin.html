@@ -26,9 +26,7 @@
         .result-success { background: rgba(0,255,136,0.1); border: 1px solid var(--success); color: var(--success); }
         .result-error { background: var(--sale-glow); border: 1px solid var(--sale); color: var(--sale); }
         .hidden { display: none; }
-        .category-pills { display: flex; gap: 8px; flex-wrap: wrap; }
-        .category-pill { padding: 8px 16px; border: 1px solid var(--border); border-radius: 20px; background: var(--bg-secondary); color: var(--text-secondary); cursor: pointer; font-size: 0.9rem; transition: all 0.2s; }
-        .category-pill.active { background: var(--accent); color: var(--bg-primary); border-color: var(--accent); font-weight: 600; }
+        .auto-detect-note { font-size: 0.8rem; color: var(--text-muted); margin-top: 8px; font-style: italic; }
     </style>
 </head>
 <body>
@@ -56,16 +54,7 @@
                     <input type="url" class="form-input" id="shopify-url" placeholder="https://en.afew-store.com/products/..." required>
                     <div class="form-hint">Works with any Shopify store (AFEW, etc.)</div>
                 </div>
-            </div>
-            <div class="form-section">
-                <h2>Category</h2>
-                <div class="category-pills" id="shopify-category">
-                    <div class="category-pill active" data-value="sneakers">👟 Sneakers</div>
-                    <div class="category-pill" data-value="clothing">👕 Clothing</div>
-                    <div class="category-pill" data-value="accessories">🎩 Accessories</div>
-                    <div class="category-pill" data-value="kids">🧡 Kids</div>
-                    <div class="category-pill" data-value="toddler">👶 Toddler</div>
-                </div>
+                <p class="auto-detect-note">🤖 Category is auto-detected from product data (sneakers, clothing, kids, etc.). You can change it later on the product page.</p>
             </div>
             <button type="submit" class="submit-btn">Fetch & Add Product</button>
         </form>
@@ -168,27 +157,11 @@
             });
         });
 
-        // Category pill selection
-        document.querySelectorAll('.category-pills').forEach(container => {
-            container.querySelectorAll('.category-pill').forEach(pill => {
-                pill.addEventListener('click', () => {
-                    container.querySelectorAll('.category-pill').forEach(p => p.classList.remove('active'));
-                    pill.classList.add('active');
-                });
-            });
-        });
-
-        function getSelectedCategory() {
-            const active = document.querySelector('#shopify-category .category-pill.active');
-            return active ? active.dataset.value : 'sneakers';
-        }
-
-        // Shopify form
+        // Shopify form — no category picker, fully auto-detected
         document.getElementById('shopify-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             const body = {
                 product_url: document.getElementById('shopify-url').value,
-                category: getSelectedCategory(),
             };
             await submitProduct('/api/products/shopify', body);
         });
@@ -228,8 +201,11 @@
                 });
                 const data = await res.json();
                 if (res.ok) {
+                    const catEmoji = { sneakers: '\ud83d\udc5f', clothing: '\ud83d\udc55', accessories: '\ud83c\udfa9', kids: '\ud83e\udde1', toddler: '\ud83d\udc76' };
+                    const cat = data.category || 'unknown';
+                    const emoji = catEmoji[cat] || '\u2753';
                     resultDiv.className = 'result result-success';
-                    resultDiv.textContent = `\u2705 Product added! Slug: ${data.slug} (ID: ${data.id})`;
+                    resultDiv.innerHTML = `\u2705 Product added! <strong>${data.slug}</strong> (ID: ${data.id})<br>Category: ${emoji} ${cat}`;
                 } else {
                     resultDiv.className = 'result result-error';
                     resultDiv.textContent = `\u274c Error: ${data.detail || JSON.stringify(data)}`;

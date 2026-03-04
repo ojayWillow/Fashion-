@@ -7,7 +7,8 @@ class ShopifyFetchInput(BaseModel):
     product_url: str
     featured: bool = False
     store_id: Optional[int] = None
-    category: Optional[str] = None  # auto-detected if not provided
+    category: Optional[str] = None          # deprecated, use category_override
+    category_override: Optional[str] = None  # only set when user explicitly picks
 
 
 class ManualProductInput(BaseModel):

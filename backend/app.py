@@ -95,7 +95,7 @@ def get_product(slug: str):
 
 @app.patch("/api/products/{slug}")
 def update_product(slug: str, updates: dict):
-    """Update product fields. Supports: category, name, featured."""
+    """Update product fields. Supports: category, name, featured, brand, colorway."""
     conn = get_db()
     product = get_product_by_slug(conn, slug)
     if not product:
@@ -147,8 +147,11 @@ def add_shopify_product(input: ShopifyFetchInput):
     store = get_store_by_platform(conn, product_data["_base_url"])
     store_id = store["id"] if store else input.store_id
     product_data["store_id"] = store_id
-    if input.category:
-        product_data["category"] = input.category
+
+    # Only override auto-detected category if user explicitly chose one
+    # (category_override is sent only when user clicks a different pill)
+    if input.category_override:
+        product_data["category"] = input.category_override
 
     try:
         product_id = insert_product(conn, product_data)
@@ -161,7 +164,12 @@ def add_shopify_product(input: ShopifyFetchInput):
     finally:
         conn.close()
 
-    return {"id": product_id, "slug": product_data["slug"], "message": "Product added"}
+    return {
+        "id": product_id,
+        "slug": product_data["slug"],
+        "category": product_data.get("category", "sneakers"),
+        "message": "Product added",
+    }
 
 
 @app.post("/api/products/manual")
@@ -190,9 +198,7 @@ def add_manual_product(input: ManualProductInput):
 @app.get("/api/brands")
 def list_brands():
     conn = get_db()
-    rows = conn.execute(
-        "SELECT DISTINCT brand FROM products ORDER BY brand"
-    ).fetchall()
+    rows = conn.execute("SELECT DISTINCT brand FROM products ORDER BY brand").fetchall()
     conn.close()
     return [r["brand"] for r in rows]
 
@@ -200,9 +206,7 @@ def list_brands():
 @app.get("/api/categories")
 def list_categories():
     conn = get_db()
-    rows = conn.execute(
-        "SELECT DISTINCT category FROM products ORDER BY category"
-    ).fetchall()
+    rows = conn.execute("SELECT DISTINCT category FROM products ORDER BY category").fetchall()
     conn.close()
     return [r["category"] for r in rows]
 
