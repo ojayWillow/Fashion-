@@ -159,8 +159,9 @@ body {
 .card-image-wrap img {
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    object-fit: contain;
     transition: transform 0.3s;
+    image-rendering: -webkit-optimize-contrast;
 }
 
 .product-card:hover .card-image-wrap img {
@@ -325,7 +326,8 @@ body {
 .gallery-main img {
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    object-fit: contain;
+    image-rendering: -webkit-optimize-contrast;
 }
 
 .gallery-thumbs {

@@ -9,6 +9,19 @@ const sizeFilter = document.getElementById('filter-size');
 const storeFilter = document.getElementById('filter-store');
 const sortSelect = document.getElementById('sort');
 
+/**
+ * Request a specific size from Shopify CDN.
+ * Transforms URLs like: ...image_small.jpg -> ...image_600x.jpg
+ * Works with Shopify's _WIDTHx format.
+ */
+function shopifyImg(url, width) {
+    if (!url) return '';
+    // Remove any existing Shopify size suffix
+    url = url.replace(/_(pico|icon|thumb|small|compact|medium|large|grande|original|master|\d+x\d*|\d*x\d+)\./i, '.');
+    // Insert new size before file extension
+    return url.replace(/(\.[a-z]{3,4})(\?.*)?$/i, `_${width}x$1$2`);
+}
+
 async function loadStores() {
     try {
         const res = await fetch(`${API_BASE}/api/stores`);
@@ -126,8 +139,10 @@ function renderCard(p) {
     const catLabels = { sneakers: '\ud83d\udc5f', clothing: '\ud83d\udc55', accessories: '\ud83c\udfa9', kids: '\ud83e\udde1', toddler: '\ud83d\udc76' };
     const catIcon = catLabels[p.category] || '';
 
+    // Request 600px wide image for card grid (sharp on most screens incl. retina)
+    const cardImgUrl = shopifyImg(p.image_url, 600);
     const imgHtml = p.image_url
-        ? `<img src="${p.image_url}" alt="${p.name}" loading="lazy">`
+        ? `<img src="${cardImgUrl}" alt="${p.name}" loading="lazy">`
         : '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted)">No image</div>';
 
     // Render size pills (show max 8, then "+N more")
