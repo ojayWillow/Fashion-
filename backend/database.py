@@ -25,6 +25,13 @@ def init_db():
         conn.execute("ALTER TABLE products ADD COLUMN category TEXT NOT NULL DEFAULT 'sneakers'")
         conn.commit()
         print("[FASHION-] Added 'category' column to products table")
+    # Add size_original column if upgrading from older schema
+    try:
+        conn.execute("SELECT size_original FROM product_sizes LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE product_sizes ADD COLUMN size_original TEXT")
+        conn.commit()
+        print("[FASHION-] Added 'size_original' column to product_sizes table")
     conn.close()
     print(f"Database initialized at {DB_PATH}")
 
@@ -68,11 +75,12 @@ def insert_sizes(conn: sqlite3.Connection, product_id: int, sizes: list):
     for size in sizes:
         conn.execute(
             """INSERT OR REPLACE INTO product_sizes
-            (product_id, size_label, in_stock, variant_id)
-            VALUES (?, ?, ?, ?)""",
+            (product_id, size_label, size_original, in_stock, variant_id)
+            VALUES (?, ?, ?, ?, ?)""",
             (
                 product_id,
                 size["label"],
+                size.get("original_label"),
                 1 if size["in_stock"] else 0,
                 size.get("variant_id"),
             ),

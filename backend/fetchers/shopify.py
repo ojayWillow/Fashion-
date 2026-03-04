@@ -10,6 +10,7 @@ import re
 import time
 import requests
 from urllib.parse import urlparse
+from utils.size_converter import convert_to_eu
 
 SESSION = requests.Session()
 SESSION.headers.update({
@@ -169,7 +170,7 @@ def fetch_shopify_product(product_url: str) -> dict:
 
     print(f"[FASHION-] Images: {len(all_image_urls)} found")
 
-    # Sizes & availability
+    # Sizes & availability (convert to EU)
     js_avail = {}
     if js_data:
         for v in js_data.get("variants", []):
@@ -185,15 +186,19 @@ def fetch_shopify_product(product_url: str) -> dict:
         else:
             in_stock = False
 
+        raw_label = v.get("option1", v.get("title", "?"))
+        eu_label = convert_to_eu(raw_label, category)
+
         sizes.append({
-            "label": v.get("option1", v.get("title", "?")),
+            "label": eu_label,
+            "original_label": raw_label,
             "in_stock": in_stock,
             "variant_id": vid,
         })
 
     in_stock_count = sum(1 for s in sizes if s["in_stock"])
     any_in_stock = in_stock_count > 0
-    print(f"[FASHION-] Sizes: {in_stock_count}/{len(sizes)} in stock")
+    print(f"[FASHION-] Sizes: {in_stock_count}/{len(sizes)} in stock (converted to EU)")
 
     return {
         "name": json_data["title"],

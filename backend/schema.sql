@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS product_sizes (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     product_id      INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
     size_label      TEXT NOT NULL,
+    size_original   TEXT,
     in_stock        INTEGER NOT NULL DEFAULT 1,
     variant_id      TEXT,
     last_checked    TEXT,
