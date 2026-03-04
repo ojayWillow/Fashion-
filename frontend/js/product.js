@@ -6,6 +6,15 @@ const container = document.getElementById('product-detail');
 let currentSlug = null;
 let currentCategory = null;
 
+/**
+ * Request a specific size from Shopify CDN.
+ */
+function shopifyImg(url, width) {
+    if (!url) return '';
+    url = url.replace(/_(pico|icon|thumb|small|compact|medium|large|grande|original|master|\d+x\d*|\d*x\d+)\./i, '.');
+    return url.replace(/(\.[a-z]{3,4})(\?.*)?$/i, `_${width}x$1$2`);
+}
+
 async function loadProduct() {
     const params = new URLSearchParams(window.location.search);
     const slug = params.get('slug');
@@ -48,7 +57,7 @@ function renderDetail(p) {
 
     const thumbs = p.images.map((img, i) => `
         <div class="gallery-thumb ${i === 0 ? 'active' : ''}" data-index="${i}">
-            <img src="${img.image_url}" alt="${img.alt_text || p.name}">
+            <img src="${shopifyImg(img.image_url, 150)}" alt="${img.alt_text || p.name}">
         </div>
     `).join('');
 
@@ -73,7 +82,7 @@ function renderDetail(p) {
     return `
         <div class="detail-gallery">
             <div class="gallery-main">
-                ${mainImg ? `<img id="main-image" src="${mainImg}" alt="${esc(p.name)}">` : ''}
+                ${mainImg ? `<img id="main-image" src="${shopifyImg(mainImg, 1200)}" alt="${esc(p.name)}">` : ''}
             </div>
             ${p.images.length > 1 ? `<div class="gallery-thumbs">${thumbs}</div>` : ''}
         </div>
@@ -212,7 +221,7 @@ function initGallery(images) {
     document.querySelectorAll('.gallery-thumb').forEach(thumb => {
         thumb.addEventListener('click', () => {
             const idx = parseInt(thumb.dataset.index);
-            mainImg.src = images[idx].image_url;
+            mainImg.src = shopifyImg(images[idx].image_url, 1200);
             document.querySelectorAll('.gallery-thumb').forEach(t => t.classList.remove('active'));
             thumb.classList.add('active');
         });
