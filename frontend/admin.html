@@ -42,6 +42,7 @@
 
         <div class="tab-row">
             <button class="tab-btn active" data-tab="shopify">Shopify (Auto-Fetch)</button>
+            <button class="tab-btn" data-tab="end">END Clothing</button>
             <button class="tab-btn" data-tab="manual">Manual Entry</button>
         </div>
 
@@ -55,6 +56,21 @@
                     <div class="form-hint">Works with any Shopify store (AFEW, etc.)</div>
                 </div>
                 <p class="auto-detect-note">🤖 Category is auto-detected from product data (sneakers, clothing, kids, etc.). You can change it later on the product page.</p>
+            </div>
+            <button type="submit" class="submit-btn">Fetch & Add Product</button>
+        </form>
+
+        <!-- END Clothing Tab -->
+        <form id="end-form" class="hidden">
+            <div class="form-section">
+                <h2>Paste END Clothing URL</h2>
+                <div class="form-group">
+                    <label>Product URL</label>
+                    <input type="url" class="form-input" id="end-url" placeholder="https://www.endclothing.com/gb/product/..." required>
+                    <div class="form-hint">Paste any END Clothing product page URL</div>
+                </div>
+                <p class="auto-detect-note">🤖 Category is auto-detected. You can change it later on the product page.</p>
+                <p class="auto-detect-note">🍪 Requires Chrome cookies from endclothing.com — make sure you’ve visited the site recently in Chrome.</p>
             </div>
             <button type="submit" class="submit-btn">Fetch & Add Product</button>
         </form>
@@ -130,7 +146,7 @@
                 <div class="form-group">
                     <label>Store</label>
                     <select class="form-input" id="manual-store">
-                        <option value="2">END Clothing (€9.99 shipping)</option>
+                        <option value="2">END Clothing (€11.99 shipping)</option>
                         <option value="1">AFEW Store (€7.99 shipping)</option>
                     </select>
                 </div>
@@ -146,24 +162,36 @@
         const resultDiv = document.getElementById('result');
 
         // Tab switching
+        const allForms = ['shopify-form', 'end-form', 'manual-form'];
         document.querySelectorAll('.tab-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 const tab = btn.dataset.tab;
-                document.getElementById('shopify-form').classList.toggle('hidden', tab !== 'shopify');
-                document.getElementById('manual-form').classList.toggle('hidden', tab !== 'manual');
+                allForms.forEach(id => {
+                    const form = document.getElementById(id);
+                    form.classList.toggle('hidden', !id.startsWith(tab));
+                });
                 resultDiv.classList.add('hidden');
             });
         });
 
-        // Shopify form — no category picker, fully auto-detected
+        // Shopify form
         document.getElementById('shopify-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             const body = {
                 product_url: document.getElementById('shopify-url').value,
             };
             await submitProduct('/api/products/shopify', body);
+        });
+
+        // END Clothing form
+        document.getElementById('end-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const body = {
+                product_url: document.getElementById('end-url').value,
+            };
+            await submitProduct('/api/products/end', body);
         });
 
         // Manual form
