@@ -1,12 +1,7 @@
-"""END Clothing product fetcher — via Algolia search API.
+"""END Clothing product fetcher via Algolia search API.
 
 END Clothing uses Algolia for their product catalog. The search API
-is public and returns full product data as JSON:
-- name, brand, SKU, description
-- prices (full + sale) per region
-- sizes with stock counts
-- all product images
-- categories, colours, season
+is public and returns full product data as JSON.
 
 No browser needed. No anti-bot protection. Just HTTP POST.
 
@@ -27,144 +22,124 @@ import requests
 
 logger = logging.getLogger("end_worker")
 
-# END Clothing's Algolia credentials (public, embedded in their frontend JS)
-ALGOLIA_URL = "https://search1web.endclothing.com/1/indexes/*/queries"
-ALGOLIA_APP_ID = "2ESMGW31QF"
-ALGOLIA_API_KEY = "MzhhMGNlNGEtODJlNC00NmMyLWFhMWUtMzRkOGJhODYxZDIz"
+# Extracted from endclothing.com network requests 2026-03-05
+ALGOLIA_APP_ID = "KO4W2GBINK"
+ALGOLIA_API_KEY = "dfa5df098f8d677dd2105ece472a44f8"
+ALGOLIA_AGENT = "Algolia for JavaScript (5.23.4); Browser; Lite"
 
-# END uses numbered price fields per region/currency:
-# full_price_1 / final_price_1 = GBP
-# full_price_2 / final_price_2 = EUR (EU store)
-# full_price_3 / final_price_3 = USD
-# full_price_4 / final_price_4 = SEK/DKK etc.
-# We want EUR for /eu/ URLs, GBP for /gb/ URLs
 _REGION_PRICE_MAP = {
     "eu": ("full_price_2", "final_price_2", "\u20ac"),
     "gb": ("full_price_1", "final_price_1", "\u00a3"),
     "us": ("full_price_3", "final_price_3", "$"),
-    "row": ("full_price_2", "final_price_2", "\u20ac"),  # fallback to EUR
+    "row": ("full_price_2", "final_price_2", "\u20ac"),
     "ca": ("full_price_3", "final_price_3", "$"),
     "de": ("full_price_2", "final_price_2", "\u20ac"),
     "fr": ("full_price_2", "final_price_2", "\u20ac"),
 }
 
 
-def _extract_slug_and_sku(product_url: str) -> tuple[str, str]:
-    """Extract the URL slug and SKU from an END Clothing product URL.
-
-    URL format: https://www.endclothing.com/{region}/{name}-{sku}.html
-    or:         https://www.endclothing.com/{region}/{name}-{sku}
-    Example:    .../eu/mm6-maison-margiela-fleece-trackpant-sh0ka0050
-    """
+def _extract_slug_and_sku(product_url):
     path = urlparse(product_url).path.rstrip("/")
-    # Remove .html extension if present
     if path.endswith(".html"):
         path = path[:-5]
-    # Last segment is the slug
     slug = path.split("/")[-1]
-    # SKU is typically the last hyphen-separated segment
-    parts = slug.rsplit("-", 1)
-    sku = parts[-1] if len(parts) > 1 else slug
+    sku_match = re.search(r'([a-z]{1,3}\d{3,}[-_]?\d{0,3})$', slug, re.IGNORECASE)
+    if sku_match:
+        sku = sku_match.group(1)
+    else:
+        parts = slug.rsplit("-", 1)
+        sku = parts[-1] if len(parts) > 1 else slug
     return slug, sku
 
 
-def _extract_region(product_url: str) -> str:
-    """Extract the region code from the URL path."""
+def _extract_region(product_url):
     path = urlparse(product_url).path.strip("/")
     parts = path.split("/")
     if parts:
         region = parts[0].lower()
         if region in _REGION_PRICE_MAP:
             return region
-    return "eu"  # default
+    return "eu"
 
 
-def _search_algolia(query: str, sku: str = "") -> Optional[dict]:
-    """Search END's Algolia index for a product.
+def _algolia_search(query, index="production_products_en", hits_per_page=5):
+    """Make a search request to END's Algolia endpoint.
+    Passes credentials as URL query params (matching END's frontend JS)."""
+    url = (
+        f"https://search1web.endclothing.com/1/indexes/*/queries"
+        f"?x-algolia-agent={ALGOLIA_AGENT}"
+        f"&x-algolia-api-key={ALGOLIA_API_KEY}"
+        f"&x-algolia-application-id={ALGOLIA_APP_ID}"
+    )
 
-    Tries SKU first (exact match), falls back to slug-based search.
-    """
-    headers = {
-        "Content-Type": "application/json",
-        "x-algolia-application-id": ALGOLIA_APP_ID,
-        "x-algolia-api-key": ALGOLIA_API_KEY,
+    payload = {
+        "requests": [
+            {
+                "indexName": index,
+                "params": f"query={query}&hitsPerPage={hits_per_page}",
+            }
+        ]
     }
 
-    # Try SKU search first (most precise)
-    searches = []
-    if sku:
-        searches.append({
-            "indexName": "production_products_en",
-            "params": f"query={sku}&hitsPerPage=5",
-        })
-    # Also search by full slug (as fallback)
-    slug_query = query.replace("-", " ")
-    searches.append({
-        "indexName": "production_products_en",
-        "params": f"query={slug_query}&hitsPerPage=10",
-    })
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Origin": "https://www.endclothing.com",
+        "Referer": "https://www.endclothing.com/",
+    }
 
-    payload = {"requests": searches}
+    logger.info(f"Algolia search: query='{query}', index='{index}'")
 
-    logger.info(f"Searching Algolia: sku='{sku}', slug='{slug_query}'")
-
-    resp = requests.post(
-        ALGOLIA_URL,
-        headers=headers,
-        json=payload,
-        timeout=15,
-    )
+    resp = requests.post(url, headers=headers, json=payload, timeout=15)
     resp.raise_for_status()
-    data = resp.json()
+    return resp.json()
 
-    # Check SKU results first
-    for result_set in data.get("results", []):
-        hits = result_set.get("hits", [])
-        for hit in hits:
-            # Match by SKU
-            if sku and hit.get("sku", "").lower() == sku.lower():
-                logger.info(f"Found exact SKU match: {hit.get('name')}")
-                return hit
-            # Match by url_key
-            if hit.get("url_key", "") == query:
-                logger.info(f"Found url_key match: {hit.get('name')}")
+
+def _find_product(slug, sku):
+    # Strategy 1: Search by SKU
+    if sku:
+        data = _algolia_search(sku)
+        for rs in data.get("results", []):
+            for hit in rs.get("hits", []):
+                if hit.get("sku", "").lower() == sku.lower():
+                    logger.info(f"Exact SKU match: {hit.get('name')}")
+                    return hit
+                if hit.get("url_key", "") == slug:
+                    logger.info(f"url_key match: {hit.get('name')}")
+                    return hit
+
+    # Strategy 2: Search by slug words
+    slug_query = slug.replace("-", " ")
+    data = _algolia_search(slug_query, hits_per_page=10)
+    for rs in data.get("results", []):
+        for hit in rs.get("hits", []):
+            if hit.get("url_key", "") == slug:
+                logger.info(f"url_key match via slug: {hit.get('name')}")
                 return hit
 
-    # If no exact match, return best hit from slug search
-    for result_set in data.get("results", []):
-        hits = result_set.get("hits", [])
+    # Strategy 3: Best hit
+    for rs in data.get("results", []):
+        hits = rs.get("hits", [])
         if hits:
-            logger.info(f"Using best Algolia hit: {hits[0].get('name')}")
+            logger.info(f"Best Algolia hit: {hits[0].get('name')}")
             return hits[0]
 
     return None
 
 
-def _build_image_url(path: str) -> str:
-    """Convert Algolia media path to full END CDN URL."""
+def _build_image_url(path):
     if path.startswith("http"):
         return path
     return f"https://media.endclothing.com/media/catalog/product{path}"
 
 
-def _parse_sizes_and_stock(hit: dict) -> list[dict]:
-    """Extract sizes and stock from Algolia hit.
-
-    Algolia returns:
-    - size_label: ["Small", "Medium", ...] or ["EU 40", "EU 41", ...]
-    - size: same as size_label usually
-    - sku_stock: {"variant_sku": count, ...}
-    """
+def _parse_sizes_and_stock(hit):
     size_labels = hit.get("size_label") or hit.get("size") or []
     sku_stock = hit.get("sku_stock", {})
-
     if not size_labels:
         return []
-
-    # sku_stock keys are variant SKUs, values are stock counts
-    # The order usually matches size_labels
     stock_values = list(sku_stock.values()) if sku_stock else []
-
+    stock_keys = list(sku_stock.keys()) if sku_stock else []
     sizes = []
     for i, label in enumerate(size_labels):
         stock = stock_values[i] if i < len(stock_values) else 0
@@ -173,22 +148,18 @@ def _parse_sizes_and_stock(hit: dict) -> list[dict]:
             "raw_label": str(label),
             "in_stock": stock > 0,
             "stock_count": stock,
-            "variant_id": list(sku_stock.keys())[i] if i < len(sku_stock) else None,
+            "variant_id": stock_keys[i] if i < len(stock_keys) else None,
         })
-
     return sizes
 
 
-def fetch_end_page(product_url: str) -> dict:
-    """Fetch product data from END Clothing via their Algolia API.
-
-    Returns a dict compatible with the existing END product pipeline.
-    """
+def fetch_end_page(product_url):
+    """Fetch product data from END Clothing via their Algolia API."""
     slug, sku = _extract_slug_and_sku(product_url)
     region = _extract_region(product_url)
     full_key, final_key, currency = _REGION_PRICE_MAP.get(region, _REGION_PRICE_MAP["eu"])
 
-    hit = _search_algolia(slug, sku)
+    hit = _find_product(slug, sku)
 
     if not hit:
         raise RuntimeError(
@@ -196,26 +167,22 @@ def fetch_end_page(product_url: str) -> dict:
             f"Searched for SKU '{sku}' and slug '{slug}'."
         )
 
-    # --- Prices ---
     original_price = hit.get(full_key)
     sale_price = hit.get(final_key)
-    # If no region-specific price, try GBP as fallback
     if not sale_price:
         original_price = hit.get("full_price_1")
         sale_price = hit.get("final_price_1")
         currency = "\u00a3"
 
     prices = []
-    if original_price and sale_price and original_price != sale_price:
+    if original_price and sale_price and float(original_price) != float(sale_price):
         prices.append({"text": f"{currency}{original_price}", "value": float(original_price), "hasStrike": True})
         prices.append({"text": f"{currency}{sale_price}", "value": float(sale_price), "hasStrike": False})
     elif sale_price:
         prices.append({"text": f"{currency}{sale_price}", "value": float(sale_price), "hasStrike": False})
 
-    # --- Images ---
     media = hit.get("media_gallery", [])
     images = [_build_image_url(path) for path in media if path]
-    # Add small_image and model images as fallback
     for key in ("small_image", "model_full_image", "model_crop_image"):
         val = hit.get(key)
         if val and val != "no_selection":
@@ -223,15 +190,8 @@ def fetch_end_page(product_url: str) -> dict:
             if url not in images:
                 images.append(url)
 
-    # --- Sizes ---
     sizes = _parse_sizes_and_stock(hit)
-
-    # --- Category detection ---
     categories = hit.get("categories", [])
-    dept = (hit.get("departmentv1") or hit.get("department") or "").lower()
-    cat_v1 = (hit.get("categoryv1") or "").lower()
-
-    # --- Build result ---
     on_sale = original_price and sale_price and float(sale_price) < float(original_price)
 
     result = {
@@ -255,7 +215,6 @@ def fetch_end_page(product_url: str) -> dict:
                 "priceCurrency": currency,
             } if sale_price else None,
         },
-        # Extra Algolia fields
         "_algolia": {
             "objectID": hit.get("objectID"),
             "sku": hit.get("sku"),
