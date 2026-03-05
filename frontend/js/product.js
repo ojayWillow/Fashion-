@@ -8,9 +8,12 @@ let currentCategory = null;
 
 /**
  * Request a specific size from Shopify CDN.
+ * Only transforms Shopify CDN URLs — returns others unchanged.
  */
 function shopifyImg(url, width) {
     if (!url) return '';
+    // Only transform Shopify CDN URLs
+    if (!url.includes('cdn.shopify')) return url;
     url = url.replace(/_(pico|icon|thumb|small|compact|medium|large|grande|original|master|\d+x\d*|\d*x\d+)\./i, '.');
     return url.replace(/(\.[a-z]{3,4})(\?.*)?$/i, `_${width}x$1$2`);
 }
