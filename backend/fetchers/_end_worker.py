@@ -1,7 +1,7 @@
 """END Clothing scraper — Playwright with stealth.
 
 Uses a real Chromium browser via Playwright to fetch product data.
-Playwright-stealth patches the browser to avoid automation detection
+playwright-stealth patches the browser to avoid automation detection
 by Akamai Bot Manager.
 
 No manual cookie management needed — the browser handles everything.
@@ -31,15 +31,14 @@ _SIZE_IGNORE = {
 
 
 def _fetch_html(url: str) -> str:
-    """Launch a stealth Chromium browser and fetch the page HTML.
-
-    Blocks until the page is fully loaded and product content is visible.
-    """
+    """Launch a stealth Chromium browser and fetch the page HTML."""
     from playwright.sync_api import sync_playwright
-    from playwright_stealth import stealth_sync
+    from playwright_stealth import Stealth
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+    stealth = Stealth()
+
+    with stealth.use_sync(sync_playwright()) as p:
+        browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             viewport={"width": 1920, "height": 1080},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -47,7 +46,6 @@ def _fetch_html(url: str) -> str:
             timezone_id="Europe/London",
         )
         page = context.new_page()
-        stealth_sync(page)
 
         logger.info(f"Navigating to: {url}")
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
