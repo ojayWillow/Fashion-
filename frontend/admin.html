@@ -27,6 +27,7 @@
         .result-error { background: var(--sale-glow); border: 1px solid var(--sale); color: var(--sale); }
         .hidden { display: none; }
         .auto-detect-note { font-size: 0.8rem; color: var(--text-muted); margin-top: 8px; font-style: italic; }
+        .cookie-warning { font-size: 0.8rem; color: var(--warning); margin-top: 8px; padding: 8px 12px; background: rgba(255,200,0,0.08); border: 1px solid rgba(255,200,0,0.2); border-radius: var(--radius-sm); }
     </style>
 </head>
 <body>
@@ -41,20 +42,36 @@
         <h1 style="font-size: 1.5rem; margin-bottom: 24px;">Add Product</h1>
 
         <div class="tab-row">
-            <button class="tab-btn active" data-tab="shopify">Shopify (Auto-Fetch)</button>
+            <button class="tab-btn active" data-tab="shopify">Shopify (AFEW)</button>
+            <button class="tab-btn" data-tab="end">END Clothing</button>
             <button class="tab-btn" data-tab="manual">Manual Entry</button>
         </div>
 
         <!-- Shopify Tab -->
         <form id="shopify-form">
             <div class="form-section">
-                <h2>Paste Store URL</h2>
+                <h2>Paste Shopify Store URL</h2>
                 <div class="form-group">
                     <label>Product URL</label>
                     <input type="url" class="form-input" id="shopify-url" placeholder="https://en.afew-store.com/products/..." required>
                     <div class="form-hint">Works with any Shopify store (AFEW, etc.)</div>
                 </div>
                 <p class="auto-detect-note">🤖 Category is auto-detected from product data (sneakers, clothing, kids, etc.). You can change it later on the product page.</p>
+            </div>
+            <button type="submit" class="submit-btn">Fetch & Add Product</button>
+        </form>
+
+        <!-- END Clothing Tab -->
+        <form id="end-form" class="hidden">
+            <div class="form-section">
+                <h2>Paste END Clothing URL</h2>
+                <div class="form-group">
+                    <label>Product URL</label>
+                    <input type="url" class="form-input" id="end-url" placeholder="https://www.endclothing.com/gb/product/..." required>
+                    <div class="form-hint">Paste any END Clothing product page URL</div>
+                </div>
+                <p class="auto-detect-note">🤖 Category, brand, sizes, and prices are auto-scraped from the product page.</p>
+                <div class="cookie-warning">⚠️ Make sure you've visited endclothing.com in Chrome recently — the scraper uses your browser cookies to bypass Akamai protection.</div>
             </div>
             <button type="submit" class="submit-btn">Fetch & Add Product</button>
         </form>
@@ -152,18 +169,28 @@
                 btn.classList.add('active');
                 const tab = btn.dataset.tab;
                 document.getElementById('shopify-form').classList.toggle('hidden', tab !== 'shopify');
+                document.getElementById('end-form').classList.toggle('hidden', tab !== 'end');
                 document.getElementById('manual-form').classList.toggle('hidden', tab !== 'manual');
                 resultDiv.classList.add('hidden');
             });
         });
 
-        // Shopify form — no category picker, fully auto-detected
+        // Shopify form
         document.getElementById('shopify-form').addEventListener('submit', async (e) => {
             e.preventDefault();
             const body = {
                 product_url: document.getElementById('shopify-url').value,
             };
             await submitProduct('/api/products/shopify', body);
+        });
+
+        // END Clothing form
+        document.getElementById('end-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const body = {
+                product_url: document.getElementById('end-url').value,
+            };
+            await submitProduct('/api/products/end', body);
         });
 
         // Manual form
