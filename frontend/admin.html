@@ -22,11 +22,19 @@
         .tab-btn.active { background: var(--accent); color: var(--bg-primary); font-weight: 700; border-color: var(--accent); }
         .submit-btn { width: 100%; padding: 14px; background: var(--accent); color: var(--bg-primary); border: none; border-radius: var(--radius); font-size: 1.05rem; font-weight: 700; font-family: var(--font-main); cursor: pointer; text-transform: uppercase; letter-spacing: 0.05em; transition: all 0.2s; }
         .submit-btn:hover { background: #33ebff; box-shadow: 0 0 24px var(--accent-glow); }
+        .submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
         .result { margin-top: 16px; padding: 16px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 0.85rem; }
         .result-success { background: rgba(0,255,136,0.1); border: 1px solid var(--success); color: var(--success); }
         .result-error { background: var(--sale-glow); border: 1px solid var(--sale); color: var(--sale); }
         .hidden { display: none; }
         .auto-detect-note { font-size: 0.8rem; color: var(--text-muted); margin-top: 8px; font-style: italic; }
+        .setup-box { background: rgba(0,255,136,0.05); border: 1px solid rgba(0,255,136,0.2); border-radius: var(--radius-sm); padding: 16px; margin-bottom: 16px; }
+        .setup-box h3 { font-size: 0.95rem; color: var(--success); margin-bottom: 10px; }
+        .setup-box code { background: var(--bg-secondary); padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; color: var(--accent); }
+        .setup-box ol { padding-left: 20px; margin: 0; }
+        .setup-box li { font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 6px; line-height: 1.5; }
+        .loading-spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--bg-primary); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; vertical-align: middle; }
+        @keyframes spin { to { transform: rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -62,17 +70,25 @@
 
         <!-- END Clothing Tab -->
         <form id="end-form" class="hidden">
+            <div class="setup-box">
+                <h3>⚙️ One-Time Setup</h3>
+                <ol>
+                    <li>Install Scrapling: <code>pip install "scrapling[fetchers]"</code></li>
+                    <li>Install stealth browser: <code>scrapling install</code></li>
+                    <li>That's it — no cookies, no Chrome, just paste & fetch!</li>
+                </ol>
+            </div>
             <div class="form-section">
                 <h2>Paste END Clothing URL</h2>
                 <div class="form-group">
                     <label>Product URL</label>
-                    <input type="url" class="form-input" id="end-url" placeholder="https://www.endclothing.com/gb/product/..." required>
+                    <input type="url" class="form-input" id="end-url" placeholder="https://www.endclothing.com/eu/product/..." required>
                     <div class="form-hint">Paste any END Clothing product page URL</div>
                 </div>
                 <p class="auto-detect-note">🤖 Category is auto-detected. You can change it later on the product page.</p>
-                <p class="auto-detect-note">🍪 Requires Chrome cookies from endclothing.com — make sure you’ve visited the site recently in Chrome.</p>
+                <p class="auto-detect-note">🔒 Uses a stealth browser (Camoufox) to bypass Akamai — no manual steps needed.</p>
             </div>
-            <button type="submit" class="submit-btn">Fetch & Add Product</button>
+            <button type="submit" class="submit-btn" id="end-submit-btn">Fetch & Add Product</button>
         </form>
 
         <!-- Manual Tab -->
@@ -182,7 +198,7 @@
             const body = {
                 product_url: document.getElementById('shopify-url').value,
             };
-            await submitProduct('/api/products/shopify', body);
+            await submitProduct('/api/products/shopify', body, e.target.querySelector('.submit-btn'));
         });
 
         // END Clothing form
@@ -191,7 +207,7 @@
             const body = {
                 product_url: document.getElementById('end-url').value,
             };
-            await submitProduct('/api/products/end', body);
+            await submitProduct('/api/products/end', body, document.getElementById('end-submit-btn'));
         });
 
         // Manual form
@@ -216,11 +232,17 @@
                 description: document.getElementById('manual-description').value || '',
                 store_id: parseInt(document.getElementById('manual-store').value),
             };
-            await submitProduct('/api/products/manual', body);
+            await submitProduct('/api/products/manual', body, e.target.querySelector('.submit-btn'));
         });
 
-        async function submitProduct(endpoint, body) {
+        async function submitProduct(endpoint, body, submitBtn) {
             resultDiv.classList.add('hidden');
+
+            // Show loading state
+            const originalText = submitBtn.textContent;
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<span class="loading-spinner"></span>Fetching... (stealth browser loading, may take 15-30s)';
+
             try {
                 const res = await fetch(`${API_BASE}${endpoint}`, {
                     method: 'POST',
@@ -229,20 +251,24 @@
                 });
                 const data = await res.json();
                 if (res.ok) {
-                    const catEmoji = { sneakers: '\ud83d\udc5f', clothing: '\ud83d\udc55', accessories: '\ud83c\udfa9', kids: '\ud83e\udde1', toddler: '\ud83d\udc76' };
+                    const catEmoji = { sneakers: '\uD83D\uDC5F', clothing: '\uD83D\uDC55', accessories: '\uD83C\uDFA9', kids: '\uD83E\uDDE1', toddler: '\uD83D\uDC76' };
                     const cat = data.category || 'unknown';
                     const emoji = catEmoji[cat] || '\u2753';
                     resultDiv.className = 'result result-success';
-                    resultDiv.innerHTML = `\u2705 Product added! <strong>${data.slug}</strong> (ID: ${data.id})<br>Category: ${emoji} ${cat}`;
+                    resultDiv.innerHTML = `\u2705 Product added! <strong>${data.name || data.slug}</strong> (ID: ${data.id})<br>Category: ${emoji} ${cat}`;
                 } else {
                     resultDiv.className = 'result result-error';
-                    resultDiv.textContent = `\u274c Error: ${data.detail || JSON.stringify(data)}`;
+                    resultDiv.textContent = `\u274C Error: ${data.detail || JSON.stringify(data)}`;
                 }
             } catch (e) {
                 resultDiv.className = 'result result-error';
-                resultDiv.textContent = `\u274c Network error: ${e.message}`;
+                resultDiv.textContent = `\u274C Network error: ${e.message}`;
             }
             resultDiv.classList.remove('hidden');
+
+            // Restore button
+            submitBtn.disabled = false;
+            submitBtn.textContent = originalText;
         }
     </script>
 </body>

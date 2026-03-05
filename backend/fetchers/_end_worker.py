@@ -1,84 +1,51 @@
-"""END Clothing scraper — plain HTTP with browser cookies.
+"""END Clothing scraper — Scrapling StealthyFetcher.
 
-Uses requests + BeautifulSoup to fetch product data from END Clothing.
-Avoids Playwright/CDP entirely — no automation fingerprints for Akamai.
+Uses Scrapling's StealthyFetcher (Camoufox-based stealth browser) to fetch
+END Clothing product pages. This bypasses Akamai Bot Manager by using a
+real modified Firefox browser with fingerprint spoofing — no cookies needed,
+no manual steps, no detection.
 
-Cookies are sourced from the user's real Chrome browser via browser_cookie3.
-If cookies are expired or missing, the user just needs to visit
-endclothing.com once in Chrome to refresh them.
+Setup (one-time):
+    pip install "scrapling[fetchers]"
+    scrapling install          # downloads stealth browser + dependencies
 
 Usage:
     from fetchers._end_worker import fetch_end_page
-    data = fetch_end_page("https://www.endclothing.com/gb/product/...")
+    data = fetch_end_page("https://www.endclothing.com/eu/product/...")
+
+Returns a dict with: name, brand, colour, description, images, prices, sizes, breadcrumbs, ld (JSON-LD).
 """
 import re
 import json
 import logging
 from typing import Optional
 
-import requests
-from bs4 import BeautifulSoup
-
 logger = logging.getLogger("end_worker")
-
-# Realistic Chrome headers
-_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-GB,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Cache-Control": "no-cache",
-    "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-}
 
 # Labels to ignore from size selectors
 _SIZE_IGNORE = {
     'size guide', 'size chart', 'find your size', 'select size',
     'choose size', 'add to bag', 'add to cart', 'notify me', 'sold out',
+    'one size',
 }
 
 
-def _load_cookies() -> dict:
-    """Load END Clothing cookies from Chrome's cookie store.
-
-    Returns a dict of cookies for endclothing.com.
-    Falls back to empty dict if browser_cookie3 is not installed
-    or cookies can't be read.
-    """
-    try:
-        import browser_cookie3
-        cj = browser_cookie3.chrome(domain_name=".endclothing.com")
-        cookies = {c.name: c.value for c in cj}
-        if cookies:
-            logger.info(f"Loaded {len(cookies)} cookies from Chrome")
-        else:
-            logger.warning("No END cookies found in Chrome — visit endclothing.com first")
-        return cookies
-    except Exception as e:
-        logger.warning(f"Could not load Chrome cookies: {e}")
-        return {}
-
-
-def _extract_json_ld(soup: BeautifulSoup) -> Optional[dict]:
+def _extract_json_ld(page) -> Optional[dict]:
     """Extract Product JSON-LD structured data from the page."""
-    for script in soup.find_all("script", type="application/ld+json"):
+    for script in page.css('script[type="application/ld+json"]'):
         try:
-            data = json.loads(script.string or "")
+            text = script.text or ""
+            data = json.loads(text)
             if isinstance(data, dict) and data.get("@graph"):
                 data = data["@graph"]
             candidates = data if isinstance(data, list) else [data]
             for item in candidates:
                 if isinstance(item, dict) and item.get("@type") == "Product":
+                    brand_raw = item.get("brand")
+                    brand = brand_raw.get("name") if isinstance(brand_raw, dict) else brand_raw
                     return {
                         "name": item.get("name"),
-                        "brand": item.get("brand", {}).get("name") if isinstance(item.get("brand"), dict) else item.get("brand"),
+                        "brand": brand,
                         "sku": item.get("sku") or item.get("productID") or item.get("mpn"),
                         "description": item.get("description"),
                         "image": item.get("image"),
@@ -90,12 +57,11 @@ def _extract_json_ld(soup: BeautifulSoup) -> Optional[dict]:
     return None
 
 
-def _extract_images(soup: BeautifulSoup) -> list[str]:
+def _extract_images(page) -> list[str]:
     """Extract product image URLs from the page."""
     images = []
     seen = set()
 
-    # Priority: Cloudinary/media.endclothing.com images
     selectors = [
         '[data-testid*="image"] img',
         '.product-image img',
@@ -103,21 +69,21 @@ def _extract_images(soup: BeautifulSoup) -> list[str]:
         '[class*="gallery"] img',
         '[class*="Gallery"] img',
         '[class*="carousel"] img',
+        '[class*="slider"] img',
     ]
     for selector in selectors:
-        for img in soup.select(selector):
-            src = img.get("src") or img.get("data-src") or ""
-            srcset = img.get("srcset", "")
+        for img in page.css(selector):
+            src = img.attrib.get("src") or img.attrib.get("data-src") or ""
+            srcset = img.attrib.get("srcset", "")
             if srcset and not src:
                 src = srcset.split(" ")[0]
             if src and src not in seen and "media.endclothing.com" in src:
                 seen.add(src)
                 images.append(src)
 
-    # Fallback: any media.endclothing.com img
     if not images:
-        for img in soup.find_all("img"):
-            src = img.get("src", "")
+        for img in page.css("img"):
+            src = img.attrib.get("src", "")
             if "media.endclothing.com" in src and src not in seen and "logo" not in src and "icon" not in src:
                 seen.add(src)
                 images.append(src)
@@ -125,20 +91,26 @@ def _extract_images(soup: BeautifulSoup) -> list[str]:
     return images
 
 
-def _extract_prices(soup: BeautifulSoup) -> list[dict]:
+def _extract_prices(page) -> list[dict]:
     """Extract price elements from the page."""
     prices = []
-    price_pattern = re.compile(r"[\u20ac\u00a3$]\s*([\d,.]+)")
+    price_pattern = re.compile(r"[\u20ac\u00a3$\u20ac\u00a3]\s*([\d,.]+)")
 
-    selectors = '[data-testid*="price"], .price, .product-price, [class*="Price"]'
-    for el in soup.select(selectors):
-        text = el.get_text(strip=True)
+    selectors = '[data-testid*="price"], .price, .product-price, [class*="Price"], [class*="price"]'
+    for el in page.css(selectors):
+        text = el.text.strip() if el.text else ""
+        if not text:
+            continue
         match = price_pattern.search(text)
         if match:
-            has_strike = bool(
-                el.find_parent("s") or el.find_parent("del")
-                or el.find("s") or el.find("del")
-            )
+            el_html = str(el.html or "")
+            has_strike = "<s" in el_html or "<del" in el_html or "line-through" in el_html
+            parent = el.parent
+            if parent:
+                parent_html = str(parent.html or "")
+                if "<s" in parent_html or "<del" in parent_html:
+                    has_strike = True
+
             prices.append({
                 "text": text,
                 "value": float(match.group(1).replace(",", "")),
@@ -147,11 +119,10 @@ def _extract_prices(soup: BeautifulSoup) -> list[dict]:
     return prices
 
 
-def _extract_sizes(soup: BeautifulSoup) -> list[dict]:
+def _extract_sizes(page) -> list[dict]:
     """Extract size options from the page."""
     sizes = []
 
-    # Primary: size buttons
     selectors = [
         '[data-test-id="Size__Button"]',
         '[data-testid*="size"] button',
@@ -161,17 +132,19 @@ def _extract_sizes(soup: BeautifulSoup) -> list[dict]:
         '[role="option"]',
     ]
     for selector in selectors:
-        for btn in soup.select(selector):
-            label = btn.get_text(strip=True)
-            if not label or len(label) > 30 or label.lower() in _SIZE_IGNORE:
+        for btn in page.css(selector):
+            label = btn.text.strip() if btn.text else ""
+            if not label or len(label) > 30 or label.lower().strip() in _SIZE_IGNORE:
                 continue
 
+            classes = btn.attrib.get("class", "")
             disabled = (
-                btn.get("disabled") is not None
-                or "disabled" in btn.get("class", [])
-                or btn.get("aria-disabled") == "true"
-                or "out-of-stock" in btn.get("class", [])
-                or "unavailable" in btn.get("class", [])
+                btn.attrib.get("disabled") is not None
+                or "disabled" in classes
+                or btn.attrib.get("aria-disabled") == "true"
+                or "out-of-stock" in classes
+                or "unavailable" in classes
+                or "sold-out" in classes
             )
             sold_out = "sold out" in label.lower()
 
@@ -181,13 +154,12 @@ def _extract_sizes(soup: BeautifulSoup) -> list[dict]:
                 "in_stock": not disabled and not sold_out,
             })
 
-    # Fallback: select/option
     if not sizes:
-        for opt in soup.select('select option, [role="listbox"] [role="option"]'):
-            label = opt.get_text(strip=True)
-            if not label or len(label) > 30 or label.lower() in _SIZE_IGNORE or "select" in label.lower():
+        for opt in page.css('select option, [role="listbox"] [role="option"]'):
+            label = opt.text.strip() if opt.text else ""
+            if not label or len(label) > 30 or label.lower().strip() in _SIZE_IGNORE or "select" in label.lower():
                 continue
-            disabled = opt.get("disabled") is not None or opt.get("aria-disabled") == "true"
+            disabled = opt.attrib.get("disabled") is not None or opt.attrib.get("aria-disabled") == "true"
             sizes.append({
                 "label": label,
                 "raw_label": label,
@@ -197,13 +169,13 @@ def _extract_sizes(soup: BeautifulSoup) -> list[dict]:
     return sizes
 
 
-def _extract_breadcrumbs(soup: BeautifulSoup) -> list[str]:
+def _extract_breadcrumbs(page) -> list[str]:
     """Extract breadcrumb navigation links."""
     crumbs = []
     selectors = '[class*="breadcrumb"] a, nav[aria-label*="breadcrumb"] a, [data-testid*="breadcrumb"] a'
-    for a in soup.select(selectors):
-        text = a.get_text(strip=True)
-        if text and text != "Home":
+    for a in page.css(selectors):
+        text = a.text.strip() if a.text else ""
+        if text and text.lower() != "home":
             crumbs.append(text)
     return crumbs
 
@@ -211,72 +183,74 @@ def _extract_breadcrumbs(soup: BeautifulSoup) -> list[str]:
 def fetch_end_page(product_url: str) -> dict:
     """Fetch and parse an END Clothing product page.
 
-    Uses plain HTTP requests with Chrome cookies.
-    Returns the same data structure as the old Playwright worker.
+    Uses Scrapling's StealthyFetcher — a Camoufox-based stealth browser
+    that bypasses Akamai Bot Manager without any manual cookie steps.
 
     Raises:
         RuntimeError: If blocked by Akamai or page can't be fetched.
         ValueError: If no product data could be extracted.
     """
-    cookies = _load_cookies()
+    from scrapling.fetchers import StealthyFetcher
 
-    session = requests.Session()
-    session.headers.update(_HEADERS)
-    if cookies:
-        session.cookies.update(cookies)
+    logger.info(f"Fetching END page with StealthyFetcher: {product_url}")
 
-    logger.info(f"Fetching: {product_url}")
-    resp = session.get(product_url, timeout=20)
-
-    # Check for Akamai block
-    if resp.status_code == 403 or "you have been blocked" in resp.text.lower():
+    try:
+        page = StealthyFetcher.fetch(
+            product_url,
+            headless=True,
+            network_idle=True,
+            block_images=False,
+        )
+    except Exception as e:
         raise RuntimeError(
-            "Blocked by END's Akamai protection. "
-            "Please visit endclothing.com in Chrome to refresh cookies, "
-            "then try again. If still blocked, wait 15-30 minutes."
+            f"StealthyFetcher failed to load page: {e}. "
+            "Make sure you ran: pip install \"scrapling[fetchers]\" && scrapling install"
         )
 
-    resp.raise_for_status()
-
-    soup = BeautifulSoup(resp.text, "lxml")
-
-    # Check if we got a real product page
-    title = soup.title.string if soup.title else ""
-    if "blocked" in title.lower() or "sorry" in title.lower():
+    if page.status and page.status == 403:
         raise RuntimeError(
-            "END returned a block page. Visit endclothing.com in Chrome first."
+            "Blocked by END's Akamai protection (403). "
+            "Try again in a few minutes — your IP may be temporarily flagged."
         )
 
-    # Extract all data
-    ld = _extract_json_ld(soup)
-    images = _extract_images(soup)
-    prices = _extract_prices(soup)
-    sizes = _extract_sizes(soup)
-    breadcrumbs = _extract_breadcrumbs(soup)
+    page_text = page.text.lower() if page.text else ""
+    title_el = page.css_first("title")
+    title_text = title_el.text.lower() if title_el and title_el.text else ""
 
-    # Name from DOM
-    name_el = soup.select_one('[data-testid="product-title"], h1.product-title, h1')
-    name = name_el.get_text(strip=True) if name_el else ""
+    if "you have been blocked" in page_text or "access denied" in page_text:
+        raise RuntimeError(
+            "END returned a block page. Your IP may be temporarily flagged. "
+            "Try again in 15-30 minutes."
+        )
 
-    # Brand from DOM
-    brand_el = soup.select_one('[data-testid="product-brand"], .product-brand, a[href*="/brand/"]')
-    brand = brand_el.get_text(strip=True) if brand_el else ""
+    if "blocked" in title_text or "sorry" in title_text:
+        raise RuntimeError("END returned a block/error page.")
 
-    # Colour from DOM
+    ld = _extract_json_ld(page)
+    images = _extract_images(page)
+    prices = _extract_prices(page)
+    sizes = _extract_sizes(page)
+    breadcrumbs = _extract_breadcrumbs(page)
+
+    name_el = page.css_first('[data-testid="product-title"], h1.product-title, h1')
+    name = name_el.text.strip() if name_el and name_el.text else ""
+
+    brand_el = page.css_first('[data-testid="product-brand"], .product-brand, a[href*="/brand/"]')
+    brand = brand_el.text.strip() if brand_el and brand_el.text else ""
+
     colour = ""
-    colour_el = soup.select_one('[data-testid="product-colour"], .product-colour')
-    if colour_el:
-        colour = colour_el.get_text(strip=True)
+    colour_el = page.css_first('[data-testid="product-colour"], .product-colour')
+    if colour_el and colour_el.text:
+        colour = colour_el.text.strip()
     if not colour:
-        for el in soup.find_all(["span", "p", "div"]):
-            txt = el.get_text(strip=True)
+        for el in page.css("span, p, div"):
+            txt = el.text.strip() if el.text else ""
             if txt.lower().startswith("colour:"):
                 colour = re.sub(r"^colour:\s*", "", txt, flags=re.IGNORECASE).strip()
                 break
 
-    # Description
-    desc_el = soup.select_one('[data-testid="product-description"], .product-description, [class*="description"] p')
-    description = str(desc_el) if desc_el else ""
+    desc_el = page.css_first('[data-testid="product-description"], .product-description, [class*="description"] p')
+    description = str(desc_el.html) if desc_el and desc_el.html else ""
 
     result = {
         "ld": ld or {},
@@ -304,4 +278,4 @@ if __name__ == "__main__":
         print("Usage: python _end_worker.py <product_url>")
         sys.exit(1)
     data = fetch_end_page(sys.argv[1])
-    print(json.dumps(data, indent=2))
+    print(json.dumps(data, indent=2, default=str))
