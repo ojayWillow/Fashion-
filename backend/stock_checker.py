@@ -84,7 +84,10 @@ def run_stock_check():
 
         # --- Shopify: auto-check ---
         try:
-            result = check_shopify_product(p["product_url"], p["slug"])
+            # Extract the actual Shopify handle from the product URL
+            # (the slug in the DB may differ from the real Shopify handle)
+            handle = p["product_url"].rstrip("/").split("/products/")[-1].split("?")[0]
+            result = check_shopify_product(p["product_url"], handle)
             checked += 1
 
             conn.execute(
