@@ -1,18 +1,48 @@
 """FastAPI application — serves the catalog API + frontend."""
-import sys
+import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pathlib import Path
 from typing import Optional
+from apscheduler.schedulers.background import BackgroundScheduler
 
 from database import get_db, init_db, insert_product, insert_images, insert_sizes, get_all_products, get_product_by_slug, get_store_by_platform
 from models import ManualProductInput, ShopifyFetchInput, ProductCardOut, ProductDetailOut, StoreOut
 from fetchers.shopify import fetch_shopify_product
 from fetchers.manual import build_manual_product
+from stock_checker import run_stock_check, get_status as get_stock_status
 
-app = FastAPI(title="Fashion Catalog API", version="0.1.0")
+logger = logging.getLogger("fashion")
+
+# --- Scheduler setup ---
+scheduler = BackgroundScheduler()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    init_db()
+    scheduler.add_job(
+        run_stock_check,
+        "interval",
+        minutes=30,
+        id="stock_checker",
+        replace_existing=True,
+        max_instances=1,
+    )
+    scheduler.start()
+    logger.info("[FASHION-] Server ready! Stock checker scheduled every 30 min.")
+    print("[FASHION-] Server ready! Stock checker scheduled every 30 min. Open http://127.0.0.1:8000")
+    yield
+    # Shutdown
+    scheduler.shutdown(wait=False)
+    logger.info("[FASHION-] Scheduler stopped.")
+
+
+app = FastAPI(title="Fashion Catalog API", version="0.2.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -24,11 +54,29 @@ app.add_middleware(
 FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend")
 
 
-@app.on_event("startup")
-def startup():
-    init_db()
-    print("[FASHION-] Server ready! Open http://127.0.0.1:8000 in your browser.")
+# ─── Stock Check Endpoints ─────────────────────────────
 
+@app.get("/api/stock-check/status")
+def stock_check_status():
+    """Return info about the scheduled stock checker."""
+    status = get_stock_status()
+    status["scheduler_running"] = scheduler.running
+    next_run = scheduler.get_job("stock_checker")
+    status["next_run"] = str(next_run.next_run_time) if next_run else None
+    return status
+
+
+@app.post("/api/stock-check/trigger")
+def trigger_stock_check():
+    """Manually trigger a stock check now."""
+    try:
+        result = run_stock_check()
+        return {"message": "Stock check completed", "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Stock check failed: {e}")
+
+
+# ─── Store Endpoints ───────────────────────────────────
 
 @app.get("/api/stores", response_model=list[StoreOut])
 def list_stores():
@@ -37,6 +85,8 @@ def list_stores():
     conn.close()
     return [dict(r) for r in rows]
 
+
+# ─── Product Endpoints ─────────────────────────────────
 
 @app.get("/api/products")
 def list_products(
@@ -69,7 +119,6 @@ def list_products(
         ).fetchone()
         p["image_url"] = img["image_url"] if img else None
 
-        # Attach in-stock sizes to each product card
         sizes = conn.execute(
             "SELECT size_label FROM product_sizes WHERE product_id = ? AND in_stock = 1 ORDER BY size_label",
             (p["id"],),
@@ -155,8 +204,6 @@ def add_shopify_product(input: ShopifyFetchInput):
     store_id = store["id"] if store else input.store_id
     product_data["store_id"] = store_id
 
-    # Only override auto-detected category if user explicitly chose one
-    # (category_override is sent only when user clicks a different pill)
     if input.category_override:
         product_data["category"] = input.category_override
 
@@ -202,6 +249,8 @@ def add_manual_product(input: ManualProductInput):
     return {"id": product_id, "slug": product_data["slug"], "message": "Product added"}
 
 
+# ─── Filter Endpoints ──────────────────────────────────
+
 @app.get("/api/brands")
 def list_brands():
     conn = get_db()
@@ -237,7 +286,7 @@ def list_sizes(category: Optional[str] = None):
     return [r["size_label"] for r in rows]
 
 
-# --- Serve Frontend ---
+# ─── Serve Frontend ────────────────────────────────────
 
 try:
     css_dir = FRONTEND_DIR / "css"
