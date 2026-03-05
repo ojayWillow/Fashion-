@@ -10,9 +10,10 @@ from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from database import get_db, init_db, insert_product, insert_images, insert_sizes, get_all_products, get_product_by_slug, get_store_by_platform
-from models import ManualProductInput, ShopifyFetchInput, ProductCardOut, ProductDetailOut, StoreOut
+from models import ManualProductInput, ShopifyFetchInput, EndFetchInput, ProductCardOut, ProductDetailOut, StoreOut
 from fetchers.shopify import fetch_shopify_product
 from fetchers.manual import build_manual_product
+from fetchers.end_clothing import fetch_end_product
 from stock_checker import run_stock_check, get_status as get_stock_status
 
 logger = logging.getLogger("fashion")
@@ -42,7 +43,7 @@ async def lifespan(app: FastAPI):
     logger.info("[FASHION-] Scheduler stopped.")
 
 
-app = FastAPI(title="Fashion Catalog API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Fashion Catalog API", version="0.3.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,7 +55,7 @@ app.add_middleware(
 FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend")
 
 
-# ─── Stock Check Endpoints ─────────────────────────────
+# ─── Stock Check Endpoints ─────────────────────────
 
 @app.get("/api/stock-check/status")
 def stock_check_status():
@@ -76,7 +77,7 @@ def trigger_stock_check():
         raise HTTPException(status_code=500, detail=f"Stock check failed: {e}")
 
 
-# ─── Store Endpoints ───────────────────────────────────
+# ─── Store Endpoints ─────────────────────────────
 
 @app.get("/api/stores", response_model=list[StoreOut])
 def list_stores():
@@ -86,7 +87,7 @@ def list_stores():
     return [dict(r) for r in rows]
 
 
-# ─── Product Endpoints ─────────────────────────────────
+# ─── Product Endpoints ───────────────────────────
 
 @app.get("/api/products")
 def list_products(
@@ -226,6 +227,60 @@ def add_shopify_product(input: ShopifyFetchInput):
     }
 
 
+@app.post("/api/products/end")
+def add_end_product(input: EndFetchInput):
+    """Fetch and save a product from END Clothing.
+
+    Requires browser_cookie3 + Chrome cookies from endclothing.com.
+    """
+    try:
+        product_data = fetch_end_product(input.product_url)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch END product: {e}")
+
+    conn = get_db()
+    store = get_store_by_platform(conn, product_data["_base_url"])
+    if not store:
+        conn.close()
+        raise HTTPException(
+            status_code=500,
+            detail="END Clothing store not found in database. Run init_db() to seed stores.",
+        )
+
+    product_data["store_id"] = store["id"]
+
+    if input.category_override:
+        product_data["category"] = input.category_override
+
+    if input.featured:
+        product_data["featured"] = 1
+
+    try:
+        product_id = insert_product(conn, product_data)
+        insert_images(conn, product_id, product_data["images"])
+        insert_sizes(conn, product_id, product_data["sizes"])
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=f"Failed to save END product: {e}")
+    finally:
+        conn.close()
+
+    return {
+        "id": product_id,
+        "slug": product_data["slug"],
+        "name": product_data["name"],
+        "brand": product_data["brand"],
+        "category": product_data.get("category", "sneakers"),
+        "sale_price": product_data["sale_price"],
+        "message": "END product added",
+    }
+
+
 @app.post("/api/products/manual")
 def add_manual_product(input: ManualProductInput):
     try:
@@ -249,7 +304,7 @@ def add_manual_product(input: ManualProductInput):
     return {"id": product_id, "slug": product_data["slug"], "message": "Product added"}
 
 
-# ─── Filter Endpoints ──────────────────────────────────
+# ─── Filter Endpoints ────────────────────────────
 
 @app.get("/api/brands")
 def list_brands():
@@ -286,7 +341,7 @@ def list_sizes(category: Optional[str] = None):
     return [r["size_label"] for r in rows]
 
 
-# ─── Serve Frontend ────────────────────────────────────
+# ─── Serve Frontend ──────────────────────────────
 
 try:
     css_dir = FRONTEND_DIR / "css"

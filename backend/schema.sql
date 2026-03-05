@@ -91,4 +91,4 @@ CREATE INDEX IF NOT EXISTS idx_stock_checks_product ON stock_checks(product_id);
 INSERT OR IGNORE INTO stores (name, base_url, platform, shipping_cost, free_ship_min)
 VALUES
     ('AFEW Store', 'https://en.afew-store.com', 'shopify', 7.99, 250.00),
-    ('END Clothing', 'https://www.endclothing.com', 'custom', 9.99, 250.00);
+    ('END Clothing', 'https://www.endclothing.com', 'custom', 11.99, 250.00);
