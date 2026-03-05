@@ -1,10 +1,11 @@
 """FastAPI application — serves the catalog API + frontend."""
 import logging
 from contextlib import asynccontextmanager
+import requests as http_requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pathlib import Path
 from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -55,7 +56,66 @@ app.add_middleware(
 FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend")
 
 
-# ─── Stock Check Endpoints ─────────────────────────
+# ─── Image Proxy ────────────────────────────────
+
+_ALLOWED_IMAGE_HOSTS = {
+    "media.endclothing.com",
+}
+
+# Simple in-memory cache for proxied images
+_image_cache: dict[str, tuple[bytes, str]] = {}
+_IMAGE_CACHE_MAX = 200
+
+
+@app.get("/api/image-proxy")
+def image_proxy(url: str = Query(..., description="Image URL to proxy")):
+    """Proxy external images that block hotlinking (e.g. END Clothing).
+
+    Only allows whitelisted hosts to prevent abuse.
+    Caches images in memory to reduce repeat fetches.
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+
+    if parsed.hostname not in _ALLOWED_IMAGE_HOSTS:
+        raise HTTPException(status_code=403, detail=f"Host not allowed: {parsed.hostname}")
+
+    # Check cache
+    if url in _image_cache:
+        data, content_type = _image_cache[url]
+        return Response(content=data, media_type=content_type)
+
+    try:
+        resp = http_requests.get(
+            url,
+            timeout=10,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Referer": "https://www.endclothing.com/",
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+            },
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch image: {e}")
+
+    content_type = resp.headers.get("content-type", "image/jpeg")
+    data = resp.content
+
+    # Cache (evict oldest if full)
+    if len(_image_cache) >= _IMAGE_CACHE_MAX:
+        oldest_key = next(iter(_image_cache))
+        del _image_cache[oldest_key]
+    _image_cache[url] = (data, content_type)
+
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+# ─── Stock Check Endpoints ─────────────────────
 
 @app.get("/api/stock-check/status")
 def stock_check_status():
@@ -77,7 +137,7 @@ def trigger_stock_check():
         raise HTTPException(status_code=500, detail=f"Stock check failed: {e}")
 
 
-# ─── Store Endpoints ─────────────────────────────
+# ─── Store Endpoints ───────────────────────────
 
 @app.get("/api/stores", response_model=list[StoreOut])
 def list_stores():
@@ -87,7 +147,7 @@ def list_stores():
     return [dict(r) for r in rows]
 
 
-# ─── Product Endpoints ───────────────────────────
+# ─── Product Endpoints ─────────────────────────
 
 @app.get("/api/products")
 def list_products(
@@ -304,7 +364,7 @@ def add_manual_product(input: ManualProductInput):
     return {"id": product_id, "slug": product_data["slug"], "message": "Product added"}
 
 
-# ─── Filter Endpoints ────────────────────────────
+# ─── Filter Endpoints ──────────────────────────
 
 @app.get("/api/brands")
 def list_brands():
@@ -341,7 +401,7 @@ def list_sizes(category: Optional[str] = None):
     return [r["size_label"] for r in rows]
 
 
-# ─── Serve Frontend ──────────────────────────────
+# ─── Serve Frontend ────────────────────────────
 
 try:
     css_dir = FRONTEND_DIR / "css"
