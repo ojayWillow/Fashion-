@@ -32,6 +32,11 @@ def init_db():
         conn.execute("ALTER TABLE product_sizes ADD COLUMN size_original TEXT")
         conn.commit()
         print("[FASHION-] Added 'size_original' column to product_sizes table")
+    # Fix END Clothing shipping cost (was 9.99, should be 11.99)
+    conn.execute(
+        "UPDATE stores SET shipping_cost = 11.99 WHERE base_url = 'https://www.endclothing.com' AND shipping_cost != 11.99"
+    )
+    conn.commit()
     conn.close()
     print(f"Database initialized at {DB_PATH}")
 
