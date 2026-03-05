@@ -1,8 +1,8 @@
-"""END Clothing scraper — Playwright with stealth.
+"""END Clothing scraper — Camoufox anti-detect browser.
 
-Uses a real Chromium browser via Playwright to fetch product data.
-playwright-stealth patches the browser to avoid automation detection
-by Akamai Bot Manager.
+Uses Camoufox (Firefox-based) instead of Chromium + playwright-stealth.
+Camoufox patches browser fingerprints at the C++ level, making it
+undetectable to Akamai Bot Manager, Cloudflare, DataDome, etc.
 
 No manual cookie management needed — the browser handles everything.
 
@@ -11,11 +11,14 @@ Usage:
     data = fetch_end_page("https://www.endclothing.com/gb/product/...")
 
 First-time setup:
-    pip install playwright playwright-stealth
-    python -m playwright install chromium
+    pip install camoufox[geoip]
+    camoufox fetch          # Windows
+    python -m camoufox fetch  # macOS/Linux
 """
 import re
 import json
+import time
+import random
 import logging
 from typing import Optional
 
@@ -29,38 +32,73 @@ _SIZE_IGNORE = {
     'choose size', 'add to bag', 'add to cart', 'notify me', 'sold out',
 }
 
+# Random viewport sizes to look like different real devices
+_VIEWPORTS = [
+    {"width": 1920, "height": 1080},
+    {"width": 1536, "height": 864},
+    {"width": 1440, "height": 900},
+    {"width": 1366, "height": 768},
+    {"width": 1280, "height": 720},
+]
+
+
+def _human_delay(min_s: float = 0.5, max_s: float = 2.0):
+    """Sleep for a random human-like duration."""
+    time.sleep(random.uniform(min_s, max_s))
+
 
 def _fetch_html(url: str) -> str:
-    """Launch a stealth Chromium browser and fetch the page HTML."""
-    from playwright.sync_api import sync_playwright
-    from playwright_stealth import Stealth
+    """Launch a Camoufox anti-detect browser and fetch the page HTML.
 
-    stealth = Stealth()
+    Camoufox is a modified Firefox that spoofs fingerprints at the C++ level.
+    It rotates navigator, screen, WebGL, fonts, etc. automatically via
+    BrowserForge, making each session look like a unique real device.
+    """
+    from camoufox.sync_api import Camoufox
 
-    with stealth.use_sync(sync_playwright()) as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            viewport={"width": 1920, "height": 1080},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            locale="en-GB",
-            timezone_id="Europe/London",
-        )
-        page = context.new_page()
+    viewport = random.choice(_VIEWPORTS)
+
+    with Camoufox(
+        headless=True,
+        humanize=True,          # built-in human-like mouse movement
+        i_know_what_im_doing=True,  # suppress headless warning
+    ) as browser:
+        page = browser.new_page()
+
+        # Set viewport to a random common resolution
+        page.set_viewport_size(viewport)
 
         logger.info(f"Navigating to: {url}")
-        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+        # Small pre-navigation delay to mimic user opening a tab
+        _human_delay(0.3, 1.0)
+
+        page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
         # Wait for product content to render
         try:
-            page.wait_for_selector('h1, [data-testid="product-title"], script[type="application/ld+json"]', timeout=15000)
+            page.wait_for_selector(
+                'h1, [data-testid="product-title"], '
+                'script[type="application/ld+json"]',
+                timeout=20000
+            )
         except Exception:
-            logger.warning("Timeout waiting for product content, proceeding with current HTML")
+            logger.warning(
+                "Timeout waiting for product content, "
+                "proceeding with current HTML"
+            )
 
-        # Small delay for any remaining JS rendering
-        page.wait_for_timeout(2000)
+        # Human-like delay after page load (reading the page)
+        _human_delay(1.5, 3.5)
+
+        # Optionally scroll down a bit like a real user
+        try:
+            page.mouse.wheel(0, random.randint(200, 500))
+            _human_delay(0.5, 1.5)
+        except Exception:
+            pass
 
         html = page.content()
-        browser.close()
 
     return html
 
@@ -77,8 +115,16 @@ def _extract_json_ld(soup: BeautifulSoup) -> Optional[dict]:
                 if isinstance(item, dict) and item.get("@type") == "Product":
                     return {
                         "name": item.get("name"),
-                        "brand": item.get("brand", {}).get("name") if isinstance(item.get("brand"), dict) else item.get("brand"),
-                        "sku": item.get("sku") or item.get("productID") or item.get("mpn"),
+                        "brand": (
+                            item.get("brand", {}).get("name")
+                            if isinstance(item.get("brand"), dict)
+                            else item.get("brand")
+                        ),
+                        "sku": (
+                            item.get("sku")
+                            or item.get("productID")
+                            or item.get("mpn")
+                        ),
                         "description": item.get("description"),
                         "image": item.get("image"),
                         "color": item.get("color"),
@@ -108,14 +154,23 @@ def _extract_images(soup: BeautifulSoup) -> list[str]:
             srcset = img.get("srcset", "")
             if srcset and not src:
                 src = srcset.split(" ")[0]
-            if src and src not in seen and "media.endclothing.com" in src:
+            if (
+                src
+                and src not in seen
+                and "media.endclothing.com" in src
+            ):
                 seen.add(src)
                 images.append(src)
 
     if not images:
         for img in soup.find_all("img"):
             src = img.get("src", "")
-            if "media.endclothing.com" in src and src not in seen and "logo" not in src and "icon" not in src:
+            if (
+                "media.endclothing.com" in src
+                and src not in seen
+                and "logo" not in src
+                and "icon" not in src
+            ):
                 seen.add(src)
                 images.append(src)
 
@@ -127,14 +182,19 @@ def _extract_prices(soup: BeautifulSoup) -> list[dict]:
     prices = []
     price_pattern = re.compile(r"[\u20ac\u00a3$]\s*([\d,.]+)")
 
-    selectors = '[data-testid*="price"], .price, .product-price, [class*="Price"]'
+    selectors = (
+        '[data-testid*="price"], .price, '
+        '.product-price, [class*="Price"]'
+    )
     for el in soup.select(selectors):
         text = el.get_text(strip=True)
         match = price_pattern.search(text)
         if match:
             has_strike = bool(
-                el.find_parent("s") or el.find_parent("del")
-                or el.find("s") or el.find("del")
+                el.find_parent("s")
+                or el.find_parent("del")
+                or el.find("s")
+                or el.find("del")
             )
             prices.append({
                 "text": text,
@@ -159,7 +219,11 @@ def _extract_sizes(soup: BeautifulSoup) -> list[dict]:
     for selector in selectors:
         for btn in soup.select(selector):
             label = btn.get_text(strip=True)
-            if not label or len(label) > 30 or label.lower() in _SIZE_IGNORE:
+            if (
+                not label
+                or len(label) > 30
+                or label.lower() in _SIZE_IGNORE
+            ):
                 continue
 
             disabled = (
@@ -178,11 +242,21 @@ def _extract_sizes(soup: BeautifulSoup) -> list[dict]:
             })
 
     if not sizes:
-        for opt in soup.select('select option, [role="listbox"] [role="option"]'):
+        for opt in soup.select(
+            'select option, [role="listbox"] [role="option"]'
+        ):
             label = opt.get_text(strip=True)
-            if not label or len(label) > 30 or label.lower() in _SIZE_IGNORE or "select" in label.lower():
+            if (
+                not label
+                or len(label) > 30
+                or label.lower() in _SIZE_IGNORE
+                or "select" in label.lower()
+            ):
                 continue
-            disabled = opt.get("disabled") is not None or opt.get("aria-disabled") == "true"
+            disabled = (
+                opt.get("disabled") is not None
+                or opt.get("aria-disabled") == "true"
+            )
             sizes.append({
                 "label": label,
                 "raw_label": label,
@@ -195,7 +269,11 @@ def _extract_sizes(soup: BeautifulSoup) -> list[dict]:
 def _extract_breadcrumbs(soup: BeautifulSoup) -> list[str]:
     """Extract breadcrumb navigation links."""
     crumbs = []
-    selectors = '[class*="breadcrumb"] a, nav[aria-label*="breadcrumb"] a, [data-testid*="breadcrumb"] a'
+    selectors = (
+        '[class*="breadcrumb"] a, '
+        'nav[aria-label*="breadcrumb"] a, '
+        '[data-testid*="breadcrumb"] a'
+    )
     for a in soup.select(selectors):
         text = a.get_text(strip=True)
         if text and text != "Home":
@@ -206,7 +284,7 @@ def _extract_breadcrumbs(soup: BeautifulSoup) -> list[str]:
 def fetch_end_page(product_url: str) -> dict:
     """Fetch and parse an END Clothing product page.
 
-    Uses Playwright stealth to render the page in a real browser.
+    Uses Camoufox anti-detect browser to render the page.
     Returns structured product data.
 
     Raises:
@@ -219,7 +297,11 @@ def fetch_end_page(product_url: str) -> dict:
     # Check for block page
     title = soup.title.string if soup.title else ""
     body_text = soup.get_text(" ", strip=True).lower()
-    if "blocked" in title.lower() or "you have been blocked" in body_text or "pardon our interruption" in body_text:
+    if (
+        "blocked" in title.lower()
+        or "you have been blocked" in body_text
+        or "pardon our interruption" in body_text
+    ):
         raise RuntimeError(
             "Blocked by END's Akamai protection. "
             "Try again in a few minutes."
@@ -233,27 +315,39 @@ def fetch_end_page(product_url: str) -> dict:
     breadcrumbs = _extract_breadcrumbs(soup)
 
     # Name from DOM
-    name_el = soup.select_one('[data-testid="product-title"], h1.product-title, h1')
+    name_el = soup.select_one(
+        '[data-testid="product-title"], h1.product-title, h1'
+    )
     name = name_el.get_text(strip=True) if name_el else ""
 
     # Brand from DOM
-    brand_el = soup.select_one('[data-testid="product-brand"], .product-brand, a[href*="/brand/"]')
+    brand_el = soup.select_one(
+        '[data-testid="product-brand"], '
+        '.product-brand, a[href*="/brand/"]'
+    )
     brand = brand_el.get_text(strip=True) if brand_el else ""
 
     # Colour from DOM
     colour = ""
-    colour_el = soup.select_one('[data-testid="product-colour"], .product-colour')
+    colour_el = soup.select_one(
+        '[data-testid="product-colour"], .product-colour'
+    )
     if colour_el:
         colour = colour_el.get_text(strip=True)
     if not colour:
         for el in soup.find_all(["span", "p", "div"]):
             txt = el.get_text(strip=True)
             if txt.lower().startswith("colour:"):
-                colour = re.sub(r"^colour:\s*", "", txt, flags=re.IGNORECASE).strip()
+                colour = re.sub(
+                    r"^colour:\s*", "", txt, flags=re.IGNORECASE
+                ).strip()
                 break
 
     # Description
-    desc_el = soup.select_one('[data-testid="product-description"], .product-description, [class*="description"] p')
+    desc_el = soup.select_one(
+        '[data-testid="product-description"], '
+        '.product-description, [class*="description"] p'
+    )
     description = str(desc_el) if desc_el else ""
 
     result = {
