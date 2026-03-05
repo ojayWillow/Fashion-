@@ -1,333 +1,282 @@
-"""END Clothing scraper — curl_cffi with Chrome TLS impersonation.
+"""END Clothing product fetcher — via Algolia search API.
 
-Akamai blocks at the TLS fingerprint level. No browser can fix this
-if the TLS handshake doesn't match a real browser. curl_cffi solves
-this by using BoringSSL (Chrome's TLS library) to produce an
-identical JA3 fingerprint to real Chrome.
+END Clothing uses Algolia for their product catalog. The search API
+is public and returns full product data as JSON:
+- name, brand, SKU, description
+- prices (full + sale) per region
+- sizes with stock counts
+- all product images
+- categories, colours, season
 
-This is faster, lighter, and more reliable than any browser approach.
+No browser needed. No anti-bot protection. Just HTTP POST.
 
 Usage:
     from fetchers._end_worker import fetch_end_page
-    data = fetch_end_page("https://www.endclothing.com/eu/product/...")
+    data = fetch_end_page("https://www.endclothing.com/eu/some-product-slug")
 
 Setup:
-    pip install curl_cffi beautifulsoup4 lxml
+    pip install requests
 """
 import re
 import json
-import time
-import random
 import logging
 from typing import Optional
+from urllib.parse import urlparse
 
-from bs4 import BeautifulSoup
+import requests
 
 logger = logging.getLogger("end_worker")
 
-_SIZE_IGNORE = {
-    'size guide', 'size chart', 'find your size', 'select size',
-    'choose size', 'add to bag', 'add to cart', 'notify me', 'sold out',
+# END Clothing's Algolia credentials (public, embedded in their frontend JS)
+ALGOLIA_URL = "https://search1web.endclothing.com/1/indexes/*/queries"
+ALGOLIA_APP_ID = "2ESMGW31QF"
+ALGOLIA_API_KEY = "MzhhMGNlNGEtODJlNC00NmMyLWFhMWUtMzRkOGJhODYxZDIz"
+
+# END uses numbered price fields per region/currency:
+# full_price_1 / final_price_1 = GBP
+# full_price_2 / final_price_2 = EUR (EU store)
+# full_price_3 / final_price_3 = USD
+# full_price_4 / final_price_4 = SEK/DKK etc.
+# We want EUR for /eu/ URLs, GBP for /gb/ URLs
+_REGION_PRICE_MAP = {
+    "eu": ("full_price_2", "final_price_2", "\u20ac"),
+    "gb": ("full_price_1", "final_price_1", "\u00a3"),
+    "us": ("full_price_3", "final_price_3", "$"),
+    "row": ("full_price_2", "final_price_2", "\u20ac"),  # fallback to EUR
+    "ca": ("full_price_3", "final_price_3", "$"),
+    "de": ("full_price_2", "final_price_2", "\u20ac"),
+    "fr": ("full_price_2", "final_price_2", "\u20ac"),
 }
 
-_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-]
 
-_IMPERSONATE_VERSIONS = [
-    "chrome131",
-    "chrome130",
-    "chrome124",
-]
+def _extract_slug_and_sku(product_url: str) -> tuple[str, str]:
+    """Extract the URL slug and SKU from an END Clothing product URL.
 
-
-def _fetch_html(url: str, max_retries: int = 3) -> str:
-    """Fetch page HTML using curl_cffi with Chrome TLS impersonation.
-
-    curl_cffi uses BoringSSL to produce Chrome's exact TLS fingerprint,
-    making it indistinguishable from a real Chrome browser at the
-    network level. Akamai's TLS fingerprinting cannot detect this.
+    URL format: https://www.endclothing.com/{region}/{name}-{sku}.html
+    or:         https://www.endclothing.com/{region}/{name}-{sku}
+    Example:    .../eu/mm6-maison-margiela-fleece-trackpant-sh0ka0050
     """
-    from curl_cffi import requests as cffi_requests
+    path = urlparse(product_url).path.rstrip("/")
+    # Remove .html extension if present
+    if path.endswith(".html"):
+        path = path[:-5]
+    # Last segment is the slug
+    slug = path.split("/")[-1]
+    # SKU is typically the last hyphen-separated segment
+    parts = slug.rsplit("-", 1)
+    sku = parts[-1] if len(parts) > 1 else slug
+    return slug, sku
 
-    session = cffi_requests.Session(
-        impersonate=random.choice(_IMPERSONATE_VERSIONS),
-    )
 
+def _extract_region(product_url: str) -> str:
+    """Extract the region code from the URL path."""
+    path = urlparse(product_url).path.strip("/")
+    parts = path.split("/")
+    if parts:
+        region = parts[0].lower()
+        if region in _REGION_PRICE_MAP:
+            return region
+    return "eu"  # default
+
+
+def _search_algolia(query: str, sku: str = "") -> Optional[dict]:
+    """Search END's Algolia index for a product.
+
+    Tries SKU first (exact match), falls back to slug-based search.
+    """
     headers = {
-        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "accept-language": "en-GB,en;q=0.9,en-US;q=0.8",
-        "accept-encoding": "gzip, deflate, br",
-        "cache-control": "max-age=0",
-        "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-        "sec-ch-ua-mobile": "?0",
-        "sec-ch-ua-platform": '"Windows"',
-        "sec-fetch-dest": "document",
-        "sec-fetch-mode": "navigate",
-        "sec-fetch-site": "none",
-        "sec-fetch-user": "?1",
-        "upgrade-insecure-requests": "1",
+        "Content-Type": "application/json",
+        "x-algolia-application-id": ALGOLIA_APP_ID,
+        "x-algolia-api-key": ALGOLIA_API_KEY,
     }
 
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            if attempt > 0:
-                delay = random.uniform(2, 5) * attempt
-                logger.info(f"Retry {attempt}/{max_retries} after {delay:.1f}s")
-                time.sleep(delay)
-                # Switch impersonation on retry
-                session = cffi_requests.Session(
-                    impersonate=random.choice(_IMPERSONATE_VERSIONS),
-                )
+    # Try SKU search first (most precise)
+    searches = []
+    if sku:
+        searches.append({
+            "indexName": "production_products_en",
+            "params": f"query={sku}&hitsPerPage=5",
+        })
+    # Also search by full slug (as fallback)
+    slug_query = query.replace("-", " ")
+    searches.append({
+        "indexName": "production_products_en",
+        "params": f"query={slug_query}&hitsPerPage=10",
+    })
 
-            # First visit homepage to get cookies (like a real user)
-            logger.info("Warming up: visiting endclothing.com")
-            session.get(
-                "https://www.endclothing.com",
-                headers=headers,
-                timeout=20,
-            )
-            time.sleep(random.uniform(1.0, 2.5))
+    payload = {"requests": searches}
 
-            # Now fetch the actual product page
-            logger.info(f"Fetching: {url}")
-            headers["referer"] = "https://www.endclothing.com/"
-            resp = session.get(url, headers=headers, timeout=30)
+    logger.info(f"Searching Algolia: sku='{sku}', slug='{slug_query}'")
 
-            if resp.status_code == 403:
-                logger.warning(f"Got 403 on attempt {attempt + 1}")
-                last_error = RuntimeError(f"HTTP 403 Forbidden")
-                continue
-
-            resp.raise_for_status()
-            return resp.text
-
-        except Exception as e:
-            last_error = e
-            logger.warning(f"Attempt {attempt + 1} failed: {e}")
-
-    raise RuntimeError(
-        f"Failed after {max_retries} attempts. Last error: {last_error}"
+    resp = requests.post(
+        ALGOLIA_URL,
+        headers=headers,
+        json=payload,
+        timeout=15,
     )
+    resp.raise_for_status()
+    data = resp.json()
 
+    # Check SKU results first
+    for result_set in data.get("results", []):
+        hits = result_set.get("hits", [])
+        for hit in hits:
+            # Match by SKU
+            if sku and hit.get("sku", "").lower() == sku.lower():
+                logger.info(f"Found exact SKU match: {hit.get('name')}")
+                return hit
+            # Match by url_key
+            if hit.get("url_key", "") == query:
+                logger.info(f"Found url_key match: {hit.get('name')}")
+                return hit
 
-def _try_next_data(html: str) -> Optional[dict]:
-    """Extract product data from Next.js __NEXT_DATA__ if present."""
-    soup = BeautifulSoup(html, "lxml")
-    script = soup.find("script", id="__NEXT_DATA__")
-    if not script or not script.string:
-        return None
-    try:
-        data = json.loads(script.string)
-        page_props = data.get("props", {}).get("pageProps", {})
-        if page_props:
-            logger.info("Found __NEXT_DATA__ with pageProps")
-            return page_props
-    except (json.JSONDecodeError, TypeError):
-        pass
+    # If no exact match, return best hit from slug search
+    for result_set in data.get("results", []):
+        hits = result_set.get("hits", [])
+        if hits:
+            logger.info(f"Using best Algolia hit: {hits[0].get('name')}")
+            return hits[0]
+
     return None
 
 
-def _extract_json_ld(soup: BeautifulSoup) -> Optional[dict]:
-    for script in soup.find_all("script", type="application/ld+json"):
-        try:
-            data = json.loads(script.string or "")
-            if isinstance(data, dict) and data.get("@graph"):
-                data = data["@graph"]
-            candidates = data if isinstance(data, list) else [data]
-            for item in candidates:
-                if isinstance(item, dict) and item.get("@type") == "Product":
-                    return {
-                        "name": item.get("name"),
-                        "brand": (
-                            item.get("brand", {}).get("name")
-                            if isinstance(item.get("brand"), dict)
-                            else item.get("brand")
-                        ),
-                        "sku": (
-                            item.get("sku")
-                            or item.get("productID")
-                            or item.get("mpn")
-                        ),
-                        "description": item.get("description"),
-                        "image": item.get("image"),
-                        "color": item.get("color"),
-                        "offers": item.get("offers"),
-                    }
-        except (json.JSONDecodeError, TypeError):
-            continue
-    return None
+def _build_image_url(path: str) -> str:
+    """Convert Algolia media path to full END CDN URL."""
+    if path.startswith("http"):
+        return path
+    return f"https://media.endclothing.com/media/catalog/product{path}"
 
 
-def _extract_images(soup: BeautifulSoup) -> list[str]:
-    images = []
-    seen = set()
-    selectors = [
-        '[data-testid*="image"] img',
-        '.product-image img',
-        'picture img',
-        '[class*="gallery"] img',
-        '[class*="Gallery"] img',
-        '[class*="carousel"] img',
-    ]
-    for selector in selectors:
-        for img in soup.select(selector):
-            src = img.get("src") or img.get("data-src") or ""
-            srcset = img.get("srcset", "")
-            if srcset and not src:
-                src = srcset.split(" ")[0]
-            if src and src not in seen and "media.endclothing.com" in src:
-                seen.add(src)
-                images.append(src)
-    if not images:
-        for img in soup.find_all("img"):
-            src = img.get("src", "")
-            if "media.endclothing.com" in src and src not in seen and "logo" not in src and "icon" not in src:
-                seen.add(src)
-                images.append(src)
-    return images
+def _parse_sizes_and_stock(hit: dict) -> list[dict]:
+    """Extract sizes and stock from Algolia hit.
 
+    Algolia returns:
+    - size_label: ["Small", "Medium", ...] or ["EU 40", "EU 41", ...]
+    - size: same as size_label usually
+    - sku_stock: {"variant_sku": count, ...}
+    """
+    size_labels = hit.get("size_label") or hit.get("size") or []
+    sku_stock = hit.get("sku_stock", {})
 
-def _extract_prices(soup: BeautifulSoup) -> list[dict]:
-    prices = []
-    price_pattern = re.compile(r"[\u20ac\u00a3$]\s*([\d,.]+)")
-    selectors = '[data-testid*="price"], .price, .product-price, [class*="Price"]'
-    for el in soup.select(selectors):
-        text = el.get_text(strip=True)
-        match = price_pattern.search(text)
-        if match:
-            has_strike = bool(
-                el.find_parent("s") or el.find_parent("del")
-                or el.find("s") or el.find("del")
-            )
-            prices.append({
-                "text": text,
-                "value": float(match.group(1).replace(",", "")),
-                "hasStrike": has_strike,
-            })
-    return prices
+    if not size_labels:
+        return []
 
+    # sku_stock keys are variant SKUs, values are stock counts
+    # The order usually matches size_labels
+    stock_values = list(sku_stock.values()) if sku_stock else []
 
-def _extract_sizes(soup: BeautifulSoup) -> list[dict]:
     sizes = []
-    selectors = [
-        '[data-test-id="Size__Button"]',
-        '[data-testid*="size"] button',
-        '[class*="size"] button',
-        '[class*="Size"] button',
-        'button[data-size]',
-        '[role="option"]',
-    ]
-    for selector in selectors:
-        for btn in soup.select(selector):
-            label = btn.get_text(strip=True)
-            if not label or len(label) > 30 or label.lower() in _SIZE_IGNORE:
-                continue
-            disabled = (
-                btn.get("disabled") is not None
-                or "disabled" in btn.get("class", [])
-                or btn.get("aria-disabled") == "true"
-                or "out-of-stock" in btn.get("class", [])
-                or "unavailable" in btn.get("class", [])
-            )
-            sold_out = "sold out" in label.lower()
-            sizes.append({
-                "label": label,
-                "raw_label": label,
-                "in_stock": not disabled and not sold_out,
-            })
-    if not sizes:
-        for opt in soup.select('select option, [role="listbox"] [role="option"]'):
-            label = opt.get_text(strip=True)
-            if not label or len(label) > 30 or label.lower() in _SIZE_IGNORE or "select" in label.lower():
-                continue
-            disabled = opt.get("disabled") is not None or opt.get("aria-disabled") == "true"
-            sizes.append({"label": label, "raw_label": label, "in_stock": not disabled})
+    for i, label in enumerate(size_labels):
+        stock = stock_values[i] if i < len(stock_values) else 0
+        sizes.append({
+            "label": str(label),
+            "raw_label": str(label),
+            "in_stock": stock > 0,
+            "stock_count": stock,
+            "variant_id": list(sku_stock.keys())[i] if i < len(sku_stock) else None,
+        })
+
     return sizes
 
 
-def _extract_breadcrumbs(soup: BeautifulSoup) -> list[str]:
-    crumbs = []
-    selectors = '[class*="breadcrumb"] a, nav[aria-label*="breadcrumb"] a, [data-testid*="breadcrumb"] a'
-    for a in soup.select(selectors):
-        text = a.get_text(strip=True)
-        if text and text != "Home":
-            crumbs.append(text)
-    return crumbs
-
-
 def fetch_end_page(product_url: str) -> dict:
-    """Fetch and parse an END Clothing product page.
+    """Fetch product data from END Clothing via their Algolia API.
 
-    Uses curl_cffi to impersonate Chrome's TLS fingerprint.
-    No browser needed — just HTTP requests that look exactly like Chrome.
+    Returns a dict compatible with the existing END product pipeline.
     """
-    html = _fetch_html(product_url)
-    soup = BeautifulSoup(html, "lxml")
+    slug, sku = _extract_slug_and_sku(product_url)
+    region = _extract_region(product_url)
+    full_key, final_key, currency = _REGION_PRICE_MAP.get(region, _REGION_PRICE_MAP["eu"])
 
-    # Check for block page
-    title = soup.title.string if soup.title else ""
-    body_text = soup.get_text(" ", strip=True).lower()
-    if (
-        "blocked" in title.lower()
-        or "you have been blocked" in body_text
-        or "pardon our interruption" in body_text
-    ):
+    hit = _search_algolia(slug, sku)
+
+    if not hit:
         raise RuntimeError(
-            "Blocked by END's Akamai protection. "
-            "Try again in a few minutes."
+            f"Product not found on END Clothing. "
+            f"Searched for SKU '{sku}' and slug '{slug}'."
         )
 
-    # Try __NEXT_DATA__ first
-    next_data = _try_next_data(html)
+    # --- Prices ---
+    original_price = hit.get(full_key)
+    sale_price = hit.get(final_key)
+    # If no region-specific price, try GBP as fallback
+    if not sale_price:
+        original_price = hit.get("full_price_1")
+        sale_price = hit.get("final_price_1")
+        currency = "\u00a3"
 
-    ld = _extract_json_ld(soup)
-    images = _extract_images(soup)
-    prices = _extract_prices(soup)
-    sizes = _extract_sizes(soup)
-    breadcrumbs = _extract_breadcrumbs(soup)
+    prices = []
+    if original_price and sale_price and original_price != sale_price:
+        prices.append({"text": f"{currency}{original_price}", "value": float(original_price), "hasStrike": True})
+        prices.append({"text": f"{currency}{sale_price}", "value": float(sale_price), "hasStrike": False})
+    elif sale_price:
+        prices.append({"text": f"{currency}{sale_price}", "value": float(sale_price), "hasStrike": False})
 
-    name_el = soup.select_one('[data-testid="product-title"], h1.product-title, h1')
-    name = name_el.get_text(strip=True) if name_el else ""
+    # --- Images ---
+    media = hit.get("media_gallery", [])
+    images = [_build_image_url(path) for path in media if path]
+    # Add small_image and model images as fallback
+    for key in ("small_image", "model_full_image", "model_crop_image"):
+        val = hit.get(key)
+        if val and val != "no_selection":
+            url = _build_image_url(val)
+            if url not in images:
+                images.append(url)
 
-    brand_el = soup.select_one('[data-testid="product-brand"], .product-brand, a[href*="/brand/"]')
-    brand = brand_el.get_text(strip=True) if brand_el else ""
+    # --- Sizes ---
+    sizes = _parse_sizes_and_stock(hit)
 
-    colour = ""
-    colour_el = soup.select_one('[data-testid="product-colour"], .product-colour')
-    if colour_el:
-        colour = colour_el.get_text(strip=True)
-    if not colour:
-        for el in soup.find_all(["span", "p", "div"]):
-            txt = el.get_text(strip=True)
-            if txt.lower().startswith("colour:"):
-                colour = re.sub(r"^colour:\s*", "", txt, flags=re.IGNORECASE).strip()
-                break
+    # --- Category detection ---
+    categories = hit.get("categories", [])
+    dept = (hit.get("departmentv1") or hit.get("department") or "").lower()
+    cat_v1 = (hit.get("categoryv1") or "").lower()
 
-    desc_el = soup.select_one('[data-testid="product-description"], .product-description, [class*="description"] p')
-    description = str(desc_el) if desc_el else ""
+    # --- Build result ---
+    on_sale = original_price and sale_price and float(sale_price) < float(original_price)
 
     result = {
-        "ld": ld or {},
-        "name": name,
-        "brand": brand,
-        "colour": colour,
-        "description": description,
+        "name": hit.get("name", ""),
+        "brand": hit.get("brand", ""),
+        "colour": hit.get("actual_colour") or ", ".join(hit.get("colour", [])),
+        "description": hit.get("description", ""),
         "images": images,
         "prices": prices,
         "sizes": sizes,
-        "breadcrumbs": breadcrumbs,
+        "breadcrumbs": [c for c in categories if "/" not in c],
+        "ld": {
+            "name": hit.get("name"),
+            "brand": hit.get("brand"),
+            "sku": hit.get("sku"),
+            "description": hit.get("description"),
+            "image": images[0] if images else None,
+            "color": hit.get("actual_colour"),
+            "offers": {
+                "price": sale_price,
+                "priceCurrency": currency,
+            } if sale_price else None,
+        },
+        # Extra Algolia fields
+        "_algolia": {
+            "objectID": hit.get("objectID"),
+            "sku": hit.get("sku"),
+            "url_key": hit.get("url_key"),
+            "season": hit.get("season"),
+            "gender": hit.get("gender"),
+            "department": hit.get("departmentv1") or hit.get("department"),
+            "category": hit.get("categoryv1"),
+            "sale_type": hit.get("sale_type"),
+            "on_sale": on_sale,
+            "total_stock": hit.get("stock", 0),
+            "original_price": original_price,
+            "sale_price": sale_price,
+            "currency": currency,
+        },
     }
 
-    if next_data:
-        result["_next_data"] = next_data
-
     logger.info(
-        f"Extracted: name='{name}', brand='{brand}', "
-        f"images={len(images)}, sizes={len(sizes)}, prices={len(prices)}"
+        f"Fetched via Algolia: name='{result['name']}', brand='{result['brand']}', "
+        f"images={len(images)}, sizes={len(sizes)}, "
+        f"price={currency}{sale_price}, stock={hit.get('stock', 0)}"
     )
     return result
 
@@ -339,4 +288,4 @@ if __name__ == "__main__":
         print("Usage: python _end_worker.py <product_url>")
         sys.exit(1)
     data = fetch_end_page(sys.argv[1])
-    print(json.dumps(data, indent=2))
+    print(json.dumps(data, indent=2, ensure_ascii=False))
