@@ -11,11 +11,12 @@ const sortSelect = document.getElementById('sort');
 
 /**
  * Request a specific size from Shopify CDN.
- * Transforms URLs like: ...image_small.jpg -> ...image_600x.jpg
- * Works with Shopify's _WIDTHx format.
+ * Only transforms Shopify CDN URLs — returns others unchanged.
  */
 function shopifyImg(url, width) {
     if (!url) return '';
+    // Only transform Shopify CDN URLs
+    if (!url.includes('cdn.shopify')) return url;
     // Remove any existing Shopify size suffix
     url = url.replace(/_(pico|icon|thumb|small|compact|medium|large|grande|original|master|\d+x\d*|\d*x\d+)\./i, '.');
     // Insert new size before file extension
