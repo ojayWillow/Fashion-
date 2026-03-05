@@ -1,10 +1,11 @@
 """END Clothing scraper — Camoufox anti-detect browser.
 
-Uses Camoufox (Firefox-based) instead of Chromium + playwright-stealth.
-Camoufox patches browser fingerprints at the C++ level, making it
-undetectable to Akamai Bot Manager, Cloudflare, DataDome, etc.
+Uses Camoufox (Firefox-based) in HEADED mode for maximum stealth.
+Akamai can still detect headless browsers, even patched ones.
+Running headed (or virtual display on Linux) is undetectable.
 
-No manual cookie management needed — the browser handles everything.
+On Windows: a browser window briefly appears and auto-closes.
+On Linux/Docker: set headless="virtual" (uses Xvfb, no monitor needed).
 
 Usage:
     from fetchers._end_worker import fetch_end_page
@@ -12,27 +13,26 @@ Usage:
 
 First-time setup:
     pip install camoufox[geoip]
-    camoufox fetch          # Windows
-    python -m camoufox fetch  # macOS/Linux
+    camoufox fetch
 """
+import os
 import re
 import json
 import time
 import random
 import logging
+import platform
 from typing import Optional
 
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger("end_worker")
 
-# Labels to ignore from size selectors
 _SIZE_IGNORE = {
     'size guide', 'size chart', 'find your size', 'select size',
     'choose size', 'add to bag', 'add to cart', 'notify me', 'sold out',
 }
 
-# Random viewport sizes to look like different real devices
 _VIEWPORTS = [
     {"width": 1920, "height": 1080},
     {"width": 1536, "height": 864},
@@ -43,39 +43,66 @@ _VIEWPORTS = [
 
 
 def _human_delay(min_s: float = 0.5, max_s: float = 2.0):
-    """Sleep for a random human-like duration."""
     time.sleep(random.uniform(min_s, max_s))
 
 
-def _fetch_html(url: str) -> str:
-    """Launch a Camoufox anti-detect browser and fetch the page HTML.
+def _get_headless_mode():
+    """Pick the best headless strategy per platform.
 
-    Camoufox is a modified Firefox that spoofs fingerprints at the C++ level.
-    It rotates navigator, screen, WebGL, fonts, etc. automatically via
-    BrowserForge, making each session look like a unique real device.
+    - Linux with Xvfb: "virtual" (headed in virtual display)
+    - Linux without Xvfb: False (headed, needs display)
+    - Windows/macOS: False (headed — a window briefly pops up)
+
+    Override with ENV var CAMOUFOX_HEADLESS=true|false|virtual
     """
+    override = os.environ.get("CAMOUFOX_HEADLESS", "").lower().strip()
+    if override == "true":
+        return True
+    if override == "virtual":
+        return "virtual"
+    if override == "false":
+        return False
+
+    # Default: headed on Windows/macOS, virtual on Linux
+    if platform.system() == "Linux":
+        return "virtual"
+    return False  # Windows/macOS — brief visible window
+
+
+def _fetch_html(url: str) -> str:
+    """Launch Camoufox in headed/virtual mode and fetch page HTML."""
     from camoufox.sync_api import Camoufox
 
     viewport = random.choice(_VIEWPORTS)
+    headless_mode = _get_headless_mode()
+
+    logger.info(f"Launching Camoufox (headless={headless_mode})")
 
     with Camoufox(
-        headless=True,
-        humanize=True,          # built-in human-like mouse movement
-        i_know_what_im_doing=True,  # suppress headless warning
+        headless=headless_mode,
+        humanize=True,
+        geoip=True,
     ) as browser:
         page = browser.new_page()
-
-        # Set viewport to a random common resolution
         page.set_viewport_size(viewport)
 
+        # Warm-up: visit the homepage first like a real user would
+        logger.info("Warming up: visiting endclothing.com homepage")
+        _human_delay(0.5, 1.5)
+        try:
+            page.goto("https://www.endclothing.com", wait_until="domcontentloaded", timeout=30000)
+            _human_delay(2.0, 4.0)
+            # Scroll homepage a bit
+            page.mouse.wheel(0, random.randint(300, 700))
+            _human_delay(1.0, 2.0)
+        except Exception as e:
+            logger.warning(f"Homepage warm-up failed (non-fatal): {e}")
+
+        # Now navigate to the actual product
         logger.info(f"Navigating to: {url}")
-
-        # Small pre-navigation delay to mimic user opening a tab
-        _human_delay(0.3, 1.0)
-
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
 
-        # Wait for product content to render
+        # Wait for product content
         try:
             page.wait_for_selector(
                 'h1, [data-testid="product-title"], '
@@ -83,28 +110,39 @@ def _fetch_html(url: str) -> str:
                 timeout=20000
             )
         except Exception:
-            logger.warning(
-                "Timeout waiting for product content, "
-                "proceeding with current HTML"
-            )
+            logger.warning("Timeout waiting for product content")
 
-        # Human-like delay after page load (reading the page)
-        _human_delay(1.5, 3.5)
+        # Simulate reading the page
+        _human_delay(2.0, 4.0)
 
-        # Optionally scroll down a bit like a real user
-        try:
-            page.mouse.wheel(0, random.randint(200, 500))
+        # Scroll down like a real user browsing
+        for _ in range(random.randint(1, 3)):
+            page.mouse.wheel(0, random.randint(150, 400))
             _human_delay(0.5, 1.5)
-        except Exception:
-            pass
 
         html = page.content()
 
     return html
 
 
+def _try_next_data(html: str) -> Optional[dict]:
+    """Try to extract product data from Next.js __NEXT_DATA__ if available."""
+    soup = BeautifulSoup(html, "lxml")
+    script = soup.find("script", id="__NEXT_DATA__")
+    if not script or not script.string:
+        return None
+    try:
+        data = json.loads(script.string)
+        page_props = data.get("props", {}).get("pageProps", {})
+        if page_props:
+            logger.info("Found __NEXT_DATA__ with pageProps")
+            return page_props
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return None
+
+
 def _extract_json_ld(soup: BeautifulSoup) -> Optional[dict]:
-    """Extract Product JSON-LD structured data from the page."""
     for script in soup.find_all("script", type="application/ld+json"):
         try:
             data = json.loads(script.string or "")
@@ -136,10 +174,8 @@ def _extract_json_ld(soup: BeautifulSoup) -> Optional[dict]:
 
 
 def _extract_images(soup: BeautifulSoup) -> list[str]:
-    """Extract product image URLs from the page."""
     images = []
     seen = set()
-
     selectors = [
         '[data-testid*="image"] img',
         '.product-image img',
@@ -154,47 +190,29 @@ def _extract_images(soup: BeautifulSoup) -> list[str]:
             srcset = img.get("srcset", "")
             if srcset and not src:
                 src = srcset.split(" ")[0]
-            if (
-                src
-                and src not in seen
-                and "media.endclothing.com" in src
-            ):
+            if src and src not in seen and "media.endclothing.com" in src:
                 seen.add(src)
                 images.append(src)
-
     if not images:
         for img in soup.find_all("img"):
             src = img.get("src", "")
-            if (
-                "media.endclothing.com" in src
-                and src not in seen
-                and "logo" not in src
-                and "icon" not in src
-            ):
+            if "media.endclothing.com" in src and src not in seen and "logo" not in src and "icon" not in src:
                 seen.add(src)
                 images.append(src)
-
     return images
 
 
 def _extract_prices(soup: BeautifulSoup) -> list[dict]:
-    """Extract price elements from the page."""
     prices = []
     price_pattern = re.compile(r"[\u20ac\u00a3$]\s*([\d,.]+)")
-
-    selectors = (
-        '[data-testid*="price"], .price, '
-        '.product-price, [class*="Price"]'
-    )
+    selectors = '[data-testid*="price"], .price, .product-price, [class*="Price"]'
     for el in soup.select(selectors):
         text = el.get_text(strip=True)
         match = price_pattern.search(text)
         if match:
             has_strike = bool(
-                el.find_parent("s")
-                or el.find_parent("del")
-                or el.find("s")
-                or el.find("del")
+                el.find_parent("s") or el.find_parent("del")
+                or el.find("s") or el.find("del")
             )
             prices.append({
                 "text": text,
@@ -205,9 +223,7 @@ def _extract_prices(soup: BeautifulSoup) -> list[dict]:
 
 
 def _extract_sizes(soup: BeautifulSoup) -> list[dict]:
-    """Extract size options from the page."""
     sizes = []
-
     selectors = [
         '[data-test-id="Size__Button"]',
         '[data-testid*="size"] button',
@@ -219,13 +235,8 @@ def _extract_sizes(soup: BeautifulSoup) -> list[dict]:
     for selector in selectors:
         for btn in soup.select(selector):
             label = btn.get_text(strip=True)
-            if (
-                not label
-                or len(label) > 30
-                or label.lower() in _SIZE_IGNORE
-            ):
+            if not label or len(label) > 30 or label.lower() in _SIZE_IGNORE:
                 continue
-
             disabled = (
                 btn.get("disabled") is not None
                 or "disabled" in btn.get("class", [])
@@ -234,46 +245,24 @@ def _extract_sizes(soup: BeautifulSoup) -> list[dict]:
                 or "unavailable" in btn.get("class", [])
             )
             sold_out = "sold out" in label.lower()
-
             sizes.append({
                 "label": label,
                 "raw_label": label,
                 "in_stock": not disabled and not sold_out,
             })
-
     if not sizes:
-        for opt in soup.select(
-            'select option, [role="listbox"] [role="option"]'
-        ):
+        for opt in soup.select('select option, [role="listbox"] [role="option"]'):
             label = opt.get_text(strip=True)
-            if (
-                not label
-                or len(label) > 30
-                or label.lower() in _SIZE_IGNORE
-                or "select" in label.lower()
-            ):
+            if not label or len(label) > 30 or label.lower() in _SIZE_IGNORE or "select" in label.lower():
                 continue
-            disabled = (
-                opt.get("disabled") is not None
-                or opt.get("aria-disabled") == "true"
-            )
-            sizes.append({
-                "label": label,
-                "raw_label": label,
-                "in_stock": not disabled,
-            })
-
+            disabled = opt.get("disabled") is not None or opt.get("aria-disabled") == "true"
+            sizes.append({"label": label, "raw_label": label, "in_stock": not disabled})
     return sizes
 
 
 def _extract_breadcrumbs(soup: BeautifulSoup) -> list[str]:
-    """Extract breadcrumb navigation links."""
     crumbs = []
-    selectors = (
-        '[class*="breadcrumb"] a, '
-        'nav[aria-label*="breadcrumb"] a, '
-        '[data-testid*="breadcrumb"] a'
-    )
+    selectors = '[class*="breadcrumb"] a, nav[aria-label*="breadcrumb"] a, [data-testid*="breadcrumb"] a'
     for a in soup.select(selectors):
         text = a.get_text(strip=True)
         if text and text != "Home":
@@ -284,12 +273,8 @@ def _extract_breadcrumbs(soup: BeautifulSoup) -> list[str]:
 def fetch_end_page(product_url: str) -> dict:
     """Fetch and parse an END Clothing product page.
 
-    Uses Camoufox anti-detect browser to render the page.
-    Returns structured product data.
-
-    Raises:
-        RuntimeError: If blocked by Akamai or page can't be fetched.
-        ValueError: If no product data could be extracted.
+    Uses Camoufox in headed/virtual mode for maximum stealth.
+    Visits homepage first to warm up cookies, then navigates to product.
     """
     html = _fetch_html(product_url)
     soup = BeautifulSoup(html, "lxml")
@@ -307,47 +292,34 @@ def fetch_end_page(product_url: str) -> dict:
             "Try again in a few minutes."
         )
 
-    # Extract all data
+    # Try __NEXT_DATA__ first (if END uses Next.js)
+    next_data = _try_next_data(html)
+
+    # Standard extraction
     ld = _extract_json_ld(soup)
     images = _extract_images(soup)
     prices = _extract_prices(soup)
     sizes = _extract_sizes(soup)
     breadcrumbs = _extract_breadcrumbs(soup)
 
-    # Name from DOM
-    name_el = soup.select_one(
-        '[data-testid="product-title"], h1.product-title, h1'
-    )
+    name_el = soup.select_one('[data-testid="product-title"], h1.product-title, h1')
     name = name_el.get_text(strip=True) if name_el else ""
 
-    # Brand from DOM
-    brand_el = soup.select_one(
-        '[data-testid="product-brand"], '
-        '.product-brand, a[href*="/brand/"]'
-    )
+    brand_el = soup.select_one('[data-testid="product-brand"], .product-brand, a[href*="/brand/"]')
     brand = brand_el.get_text(strip=True) if brand_el else ""
 
-    # Colour from DOM
     colour = ""
-    colour_el = soup.select_one(
-        '[data-testid="product-colour"], .product-colour'
-    )
+    colour_el = soup.select_one('[data-testid="product-colour"], .product-colour')
     if colour_el:
         colour = colour_el.get_text(strip=True)
     if not colour:
         for el in soup.find_all(["span", "p", "div"]):
             txt = el.get_text(strip=True)
             if txt.lower().startswith("colour:"):
-                colour = re.sub(
-                    r"^colour:\s*", "", txt, flags=re.IGNORECASE
-                ).strip()
+                colour = re.sub(r"^colour:\s*", "", txt, flags=re.IGNORECASE).strip()
                 break
 
-    # Description
-    desc_el = soup.select_one(
-        '[data-testid="product-description"], '
-        '.product-description, [class*="description"] p'
-    )
+    desc_el = soup.select_one('[data-testid="product-description"], .product-description, [class*="description"] p')
     description = str(desc_el) if desc_el else ""
 
     result = {
@@ -361,6 +333,10 @@ def fetch_end_page(product_url: str) -> dict:
         "sizes": sizes,
         "breadcrumbs": breadcrumbs,
     }
+
+    # If __NEXT_DATA__ had useful info, merge it
+    if next_data:
+        result["_next_data"] = next_data
 
     logger.info(
         f"Extracted: name='{name}', brand='{brand}', "
