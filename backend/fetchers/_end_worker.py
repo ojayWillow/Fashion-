@@ -1,42 +1,27 @@
-"""END Clothing scraper — plain HTTP with browser cookies.
+"""END Clothing scraper — Playwright with stealth.
 
-Uses requests + BeautifulSoup to fetch product data from END Clothing.
-Avoids Playwright/CDP entirely — no automation fingerprints for Akamai.
+Uses a real Chromium browser via Playwright to fetch product data.
+Playwright-stealth patches the browser to avoid automation detection
+by Akamai Bot Manager.
 
-Cookies are sourced from the user's real Chrome browser via browser_cookie3.
-If cookies are expired or missing, the user just needs to visit
-endclothing.com once in Chrome to refresh them.
+No manual cookie management needed — the browser handles everything.
 
 Usage:
     from fetchers._end_worker import fetch_end_page
     data = fetch_end_page("https://www.endclothing.com/gb/product/...")
+
+First-time setup:
+    pip install playwright playwright-stealth
+    python -m playwright install chromium
 """
 import re
 import json
 import logging
 from typing import Optional
 
-import requests
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger("end_worker")
-
-# Realistic Chrome headers
-_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-GB,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Cache-Control": "no-cache",
-    "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-}
 
 # Labels to ignore from size selectors
 _SIZE_IGNORE = {
@@ -45,25 +30,41 @@ _SIZE_IGNORE = {
 }
 
 
-def _load_cookies() -> dict:
-    """Load END Clothing cookies from Chrome's cookie store.
+def _fetch_html(url: str) -> str:
+    """Launch a stealth Chromium browser and fetch the page HTML.
 
-    Returns a dict of cookies for endclothing.com.
-    Falls back to empty dict if browser_cookie3 is not installed
-    or cookies can't be read.
+    Blocks until the page is fully loaded and product content is visible.
     """
-    try:
-        import browser_cookie3
-        cj = browser_cookie3.chrome(domain_name=".endclothing.com")
-        cookies = {c.name: c.value for c in cj}
-        if cookies:
-            logger.info(f"Loaded {len(cookies)} cookies from Chrome")
-        else:
-            logger.warning("No END cookies found in Chrome — visit endclothing.com first")
-        return cookies
-    except Exception as e:
-        logger.warning(f"Could not load Chrome cookies: {e}")
-        return {}
+    from playwright.sync_api import sync_playwright
+    from playwright_stealth import stealth_sync
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            locale="en-GB",
+            timezone_id="Europe/London",
+        )
+        page = context.new_page()
+        stealth_sync(page)
+
+        logger.info(f"Navigating to: {url}")
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+        # Wait for product content to render
+        try:
+            page.wait_for_selector('h1, [data-testid="product-title"], script[type="application/ld+json"]', timeout=15000)
+        except Exception:
+            logger.warning("Timeout waiting for product content, proceeding with current HTML")
+
+        # Small delay for any remaining JS rendering
+        page.wait_for_timeout(2000)
+
+        html = page.content()
+        browser.close()
+
+    return html
 
 
 def _extract_json_ld(soup: BeautifulSoup) -> Optional[dict]:
@@ -95,7 +96,6 @@ def _extract_images(soup: BeautifulSoup) -> list[str]:
     images = []
     seen = set()
 
-    # Priority: Cloudinary/media.endclothing.com images
     selectors = [
         '[data-testid*="image"] img',
         '.product-image img',
@@ -114,7 +114,6 @@ def _extract_images(soup: BeautifulSoup) -> list[str]:
                 seen.add(src)
                 images.append(src)
 
-    # Fallback: any media.endclothing.com img
     if not images:
         for img in soup.find_all("img"):
             src = img.get("src", "")
@@ -151,7 +150,6 @@ def _extract_sizes(soup: BeautifulSoup) -> list[dict]:
     """Extract size options from the page."""
     sizes = []
 
-    # Primary: size buttons
     selectors = [
         '[data-test-id="Size__Button"]',
         '[data-testid*="size"] button',
@@ -181,7 +179,6 @@ def _extract_sizes(soup: BeautifulSoup) -> list[dict]:
                 "in_stock": not disabled and not sold_out,
             })
 
-    # Fallback: select/option
     if not sizes:
         for opt in soup.select('select option, [role="listbox"] [role="option"]'):
             label = opt.get_text(strip=True)
@@ -211,40 +208,23 @@ def _extract_breadcrumbs(soup: BeautifulSoup) -> list[str]:
 def fetch_end_page(product_url: str) -> dict:
     """Fetch and parse an END Clothing product page.
 
-    Uses plain HTTP requests with Chrome cookies.
-    Returns the same data structure as the old Playwright worker.
+    Uses Playwright stealth to render the page in a real browser.
+    Returns structured product data.
 
     Raises:
         RuntimeError: If blocked by Akamai or page can't be fetched.
         ValueError: If no product data could be extracted.
     """
-    cookies = _load_cookies()
+    html = _fetch_html(product_url)
+    soup = BeautifulSoup(html, "lxml")
 
-    session = requests.Session()
-    session.headers.update(_HEADERS)
-    if cookies:
-        session.cookies.update(cookies)
-
-    logger.info(f"Fetching: {product_url}")
-    resp = session.get(product_url, timeout=20)
-
-    # Check for Akamai block
-    if resp.status_code == 403 or "you have been blocked" in resp.text.lower():
+    # Check for block page
+    title = soup.title.string if soup.title else ""
+    body_text = soup.get_text(" ", strip=True).lower()
+    if "blocked" in title.lower() or "you have been blocked" in body_text or "pardon our interruption" in body_text:
         raise RuntimeError(
             "Blocked by END's Akamai protection. "
-            "Please visit endclothing.com in Chrome to refresh cookies, "
-            "then try again. If still blocked, wait 15-30 minutes."
-        )
-
-    resp.raise_for_status()
-
-    soup = BeautifulSoup(resp.text, "lxml")
-
-    # Check if we got a real product page
-    title = soup.title.string if soup.title else ""
-    if "blocked" in title.lower() or "sorry" in title.lower():
-        raise RuntimeError(
-            "END returned a block page. Visit endclothing.com in Chrome first."
+            "Try again in a few minutes."
         )
 
     # Extract all data
