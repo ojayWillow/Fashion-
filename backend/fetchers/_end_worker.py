@@ -1,27 +1,24 @@
-"""END Clothing scraper — Camoufox anti-detect browser.
+"""END Clothing scraper — curl_cffi with Chrome TLS impersonation.
 
-Uses Camoufox (Firefox-based) in HEADED mode for maximum stealth.
-Akamai can still detect headless browsers, even patched ones.
-Running headed (or virtual display on Linux) is undetectable.
+Akamai blocks at the TLS fingerprint level. No browser can fix this
+if the TLS handshake doesn't match a real browser. curl_cffi solves
+this by using BoringSSL (Chrome's TLS library) to produce an
+identical JA3 fingerprint to real Chrome.
 
-On Windows: a browser window briefly appears and auto-closes.
-On Linux/Docker: set headless="virtual" (uses Xvfb, no monitor needed).
+This is faster, lighter, and more reliable than any browser approach.
 
 Usage:
     from fetchers._end_worker import fetch_end_page
-    data = fetch_end_page("https://www.endclothing.com/gb/product/...")
+    data = fetch_end_page("https://www.endclothing.com/eu/product/...")
 
-First-time setup:
-    pip install camoufox[geoip]
-    camoufox fetch
+Setup:
+    pip install curl_cffi beautifulsoup4 lxml
 """
-import os
 import re
 import json
 import time
 import random
 import logging
-import platform
 from typing import Optional
 
 from bs4 import BeautifulSoup
@@ -33,100 +30,92 @@ _SIZE_IGNORE = {
     'choose size', 'add to bag', 'add to cart', 'notify me', 'sold out',
 }
 
-_VIEWPORTS = [
-    {"width": 1920, "height": 1080},
-    {"width": 1536, "height": 864},
-    {"width": 1440, "height": 900},
-    {"width": 1366, "height": 768},
-    {"width": 1280, "height": 720},
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+]
+
+_IMPERSONATE_VERSIONS = [
+    "chrome131",
+    "chrome130",
+    "chrome124",
 ]
 
 
-def _human_delay(min_s: float = 0.5, max_s: float = 2.0):
-    time.sleep(random.uniform(min_s, max_s))
+def _fetch_html(url: str, max_retries: int = 3) -> str:
+    """Fetch page HTML using curl_cffi with Chrome TLS impersonation.
 
-
-def _get_headless_mode():
-    """Pick the best headless strategy per platform.
-
-    - Linux with Xvfb: "virtual" (headed in virtual display)
-    - Linux without Xvfb: False (headed, needs display)
-    - Windows/macOS: False (headed — a window briefly pops up)
-
-    Override with ENV var CAMOUFOX_HEADLESS=true|false|virtual
+    curl_cffi uses BoringSSL to produce Chrome's exact TLS fingerprint,
+    making it indistinguishable from a real Chrome browser at the
+    network level. Akamai's TLS fingerprinting cannot detect this.
     """
-    override = os.environ.get("CAMOUFOX_HEADLESS", "").lower().strip()
-    if override == "true":
-        return True
-    if override == "virtual":
-        return "virtual"
-    if override == "false":
-        return False
+    from curl_cffi import requests as cffi_requests
 
-    # Default: headed on Windows/macOS, virtual on Linux
-    if platform.system() == "Linux":
-        return "virtual"
-    return False  # Windows/macOS — brief visible window
+    session = cffi_requests.Session(
+        impersonate=random.choice(_IMPERSONATE_VERSIONS),
+    )
 
+    headers = {
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "accept-language": "en-GB,en;q=0.9,en-US;q=0.8",
+        "accept-encoding": "gzip, deflate, br",
+        "cache-control": "max-age=0",
+        "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "none",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1",
+    }
 
-def _fetch_html(url: str) -> str:
-    """Launch Camoufox in headed/virtual mode and fetch page HTML."""
-    from camoufox.sync_api import Camoufox
-
-    viewport = random.choice(_VIEWPORTS)
-    headless_mode = _get_headless_mode()
-
-    logger.info(f"Launching Camoufox (headless={headless_mode})")
-
-    with Camoufox(
-        headless=headless_mode,
-        humanize=True,
-        geoip=True,
-    ) as browser:
-        page = browser.new_page()
-        page.set_viewport_size(viewport)
-
-        # Warm-up: visit the homepage first like a real user would
-        logger.info("Warming up: visiting endclothing.com homepage")
-        _human_delay(0.5, 1.5)
+    last_error = None
+    for attempt in range(max_retries):
         try:
-            page.goto("https://www.endclothing.com", wait_until="domcontentloaded", timeout=30000)
-            _human_delay(2.0, 4.0)
-            # Scroll homepage a bit
-            page.mouse.wheel(0, random.randint(300, 700))
-            _human_delay(1.0, 2.0)
-        except Exception as e:
-            logger.warning(f"Homepage warm-up failed (non-fatal): {e}")
+            if attempt > 0:
+                delay = random.uniform(2, 5) * attempt
+                logger.info(f"Retry {attempt}/{max_retries} after {delay:.1f}s")
+                time.sleep(delay)
+                # Switch impersonation on retry
+                session = cffi_requests.Session(
+                    impersonate=random.choice(_IMPERSONATE_VERSIONS),
+                )
 
-        # Now navigate to the actual product
-        logger.info(f"Navigating to: {url}")
-        page.goto(url, wait_until="domcontentloaded", timeout=45000)
-
-        # Wait for product content
-        try:
-            page.wait_for_selector(
-                'h1, [data-testid="product-title"], '
-                'script[type="application/ld+json"]',
-                timeout=20000
+            # First visit homepage to get cookies (like a real user)
+            logger.info("Warming up: visiting endclothing.com")
+            session.get(
+                "https://www.endclothing.com",
+                headers=headers,
+                timeout=20,
             )
-        except Exception:
-            logger.warning("Timeout waiting for product content")
+            time.sleep(random.uniform(1.0, 2.5))
 
-        # Simulate reading the page
-        _human_delay(2.0, 4.0)
+            # Now fetch the actual product page
+            logger.info(f"Fetching: {url}")
+            headers["referer"] = "https://www.endclothing.com/"
+            resp = session.get(url, headers=headers, timeout=30)
 
-        # Scroll down like a real user browsing
-        for _ in range(random.randint(1, 3)):
-            page.mouse.wheel(0, random.randint(150, 400))
-            _human_delay(0.5, 1.5)
+            if resp.status_code == 403:
+                logger.warning(f"Got 403 on attempt {attempt + 1}")
+                last_error = RuntimeError(f"HTTP 403 Forbidden")
+                continue
 
-        html = page.content()
+            resp.raise_for_status()
+            return resp.text
 
-    return html
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Attempt {attempt + 1} failed: {e}")
+
+    raise RuntimeError(
+        f"Failed after {max_retries} attempts. Last error: {last_error}"
+    )
 
 
 def _try_next_data(html: str) -> Optional[dict]:
-    """Try to extract product data from Next.js __NEXT_DATA__ if available."""
+    """Extract product data from Next.js __NEXT_DATA__ if present."""
     soup = BeautifulSoup(html, "lxml")
     script = soup.find("script", id="__NEXT_DATA__")
     if not script or not script.string:
@@ -273,8 +262,8 @@ def _extract_breadcrumbs(soup: BeautifulSoup) -> list[str]:
 def fetch_end_page(product_url: str) -> dict:
     """Fetch and parse an END Clothing product page.
 
-    Uses Camoufox in headed/virtual mode for maximum stealth.
-    Visits homepage first to warm up cookies, then navigates to product.
+    Uses curl_cffi to impersonate Chrome's TLS fingerprint.
+    No browser needed — just HTTP requests that look exactly like Chrome.
     """
     html = _fetch_html(product_url)
     soup = BeautifulSoup(html, "lxml")
@@ -292,10 +281,9 @@ def fetch_end_page(product_url: str) -> dict:
             "Try again in a few minutes."
         )
 
-    # Try __NEXT_DATA__ first (if END uses Next.js)
+    # Try __NEXT_DATA__ first
     next_data = _try_next_data(html)
 
-    # Standard extraction
     ld = _extract_json_ld(soup)
     images = _extract_images(soup)
     prices = _extract_prices(soup)
@@ -334,7 +322,6 @@ def fetch_end_page(product_url: str) -> dict:
         "breadcrumbs": breadcrumbs,
     }
 
-    # If __NEXT_DATA__ had useful info, merge it
     if next_data:
         result["_next_data"] = next_data
 
