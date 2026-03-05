@@ -27,7 +27,6 @@
         .result-error { background: var(--sale-glow); border: 1px solid var(--sale); color: var(--sale); }
         .hidden { display: none; }
         .auto-detect-note { font-size: 0.8rem; color: var(--text-muted); margin-top: 8px; font-style: italic; }
-        .cookie-warning { font-size: 0.8rem; color: var(--warning); margin-top: 8px; padding: 8px 12px; background: rgba(255,200,0,0.08); border: 1px solid rgba(255,200,0,0.2); border-radius: var(--radius-sm); }
     </style>
 </head>
 <body>
@@ -67,11 +66,10 @@
                 <h2>Paste END Clothing URL</h2>
                 <div class="form-group">
                     <label>Product URL</label>
-                    <input type="url" class="form-input" id="end-url" placeholder="https://www.endclothing.com/gb/product/..." required>
-                    <div class="form-hint">Paste any END Clothing product page URL</div>
+                    <input type="url" class="form-input" id="end-url" placeholder="https://www.endclothing.com/eu/product-name-SKU.html" required>
+                    <div class="form-hint">Paste any END Clothing product page URL (EU, GB, or US)</div>
                 </div>
-                <p class="auto-detect-note">🤖 Category, brand, sizes, and prices are auto-scraped from the product page.</p>
-                <div class="cookie-warning">⚠️ Make sure you've visited endclothing.com in Chrome recently — the scraper uses your browser cookies to bypass Akamai protection.</div>
+                <p class="auto-detect-note">🤖 Brand, sizes with stock levels, images, prices, and category are all fetched automatically. No browser or cookies needed.</p>
             </div>
             <button type="submit" class="submit-btn">Fetch & Add Product</button>
         </form>
@@ -147,7 +145,7 @@
                 <div class="form-group">
                     <label>Store</label>
                     <select class="form-input" id="manual-store">
-                        <option value="2">END Clothing (€9.99 shipping)</option>
+                        <option value="2">END Clothing (€11.99 shipping)</option>
                         <option value="1">AFEW Store (€7.99 shipping)</option>
                     </select>
                 </div>
