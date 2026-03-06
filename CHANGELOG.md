@@ -2,6 +2,27 @@
 
 All notable changes to FASHION- are documented here.
 
+## [0.4.0] - 2026-03-05
+
+### Added
+- **END Clothing Algolia fetcher** — queries END's own search proxy for complete product data
+- Full size availability with per-size stock counts from Algolia
+- Multi-region price support (EU/GB/US) with sale detection
+- 6 product images per END product via media_gallery
+- Colorway, gender, season, and category data from Algolia
+- HTML LD+JSON fallback if Algolia misses
+
+### Changed
+- Replaced Playwright-based END scraper with Algolia search proxy approach
+- No more Playwright, BeautifulSoup, browser_cookie3, or lxml dependencies for END
+- Only requires `curl_cffi` (already installed)
+- Admin page END form: removed cookie warning, updated hints
+- Manual store dropdown now shows correct €11.99 END shipping cost
+
+### Fixed
+- END product fetching no longer blocked by Akamai bot protection
+- END products now get proper size and stock data (was empty before)
+
 ## [0.3.0] - 2026-03-04
 
 ### Added
