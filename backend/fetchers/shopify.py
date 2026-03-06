@@ -4,20 +4,88 @@ Uses two Shopify public endpoints:
 - /products/{handle}.json  — rich product data (images, tags, description, pricing)
 - /products/{handle}.js   — storefront data (real variant availability)
 
+For AFEW specifically, also scrapes the product page HTML to extract
+high-res packshot images from cdn.afew-store.com (the Shopify API
+only returns 1 low-quality thumbnail).
+
 These are public APIs intended for headless storefronts, not scraping.
 """
 import re
 import time
+import logging
 import requests
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from utils.size_converter import convert_to_eu
 from utils.category_detector import detect_category
 from utils.http_retry import request_with_retry
+
+logger = logging.getLogger("shopify")
 
 SESSION = requests.Session()
 SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 })
+
+# AFEW CDN image settings
+AFEW_CDN_PATTERN = re.compile(
+    r'https://cdn\.afew-store\.com/assets/[^"\'\'\s>]+\.(?:jpg|webp|png)'
+)
+AFEW_CDN_PREFERRED_RES = "1200"  # Good balance of quality vs file size
+
+
+def _scrape_afew_cdn_images(product_url: str) -> list[str]:
+    """Scrape AFEW's custom CDN packshot images from the product HTML.
+
+    AFEW stores their real product images on cdn.afew-store.com, not
+    on Shopify's CDN. The Shopify API only returns 1 thumbnail.
+
+    Each product has 5-6 rotation angles (packshots-0 through packshots-150)
+    at multiple resolutions (300, 600, 900, 1200, 1800, 2400).
+
+    We grab the 1200px versions — sorted by angle for consistent ordering.
+    """
+    try:
+        resp = request_with_retry(product_url, session=SESSION, timeout=15)
+        if resp.status_code != 200:
+            logger.warning(f"HTML scrape returned {resp.status_code}")
+            return []
+
+        html = resp.text
+        all_urls = set(AFEW_CDN_PATTERN.findall(html))
+
+        if not all_urls:
+            logger.info("No AFEW CDN images found in HTML")
+            return []
+
+        # Filter to preferred resolution only
+        preferred = [u for u in all_urls if f"/{AFEW_CDN_PREFERRED_RES}/" in u]
+
+        # If no images at preferred res, try 2400 then take whatever we find
+        if not preferred:
+            preferred = [u for u in all_urls if "/2400/" in u]
+        if not preferred:
+            # Deduplicate by angle — take highest res per unique angle
+            by_angle = {}
+            for u in all_urls:
+                # Extract angle from URL like packshots-90.jpg
+                m = re.search(r'packshots-(\d+)\.', u)
+                angle = m.group(1) if m else "unknown"
+                by_angle[angle] = u  # Last one wins (usually highest res)
+            preferred = list(by_angle.values())
+
+        # Sort by angle number for consistent gallery ordering
+        def _angle_sort_key(url: str) -> int:
+            m = re.search(r'packshots-(\d+)\.', url)
+            return int(m.group(1)) if m else 999
+
+        preferred.sort(key=_angle_sort_key)
+
+        logger.info(f"AFEW CDN: found {len(preferred)} packshot images")
+        return preferred
+
+    except Exception as e:
+        logger.warning(f"AFEW CDN image scrape failed: {e}")
+        return []
 
 
 def fetch_shopify_product(product_url: str) -> dict:
@@ -26,6 +94,8 @@ def fetch_shopify_product(product_url: str) -> dict:
     handle = parsed.path.rstrip("/").split("/")[-1]
     if not handle:
         raise ValueError(f"Could not extract product handle from URL: {product_url}")
+
+    is_afew = "afew-store.com" in parsed.netloc
 
     # Fetch .json (main data)
     json_url = f"{base_url}/products/{handle}.json"
@@ -42,8 +112,8 @@ def fetch_shopify_product(product_url: str) -> dict:
         js_resp.raise_for_status()
         js_data = js_resp.json()
     except Exception as e:
-        print(f"[FASHION-] Could not fetch .js endpoint: {e}")
-        print(f"[FASHION-] Falling back to .json availability (may show null)")
+        logger.warning(f"Could not fetch .js endpoint: {e}")
+        logger.warning(f"Falling back to .json availability (may show null)")
 
     # Basic info
     colorway = _extract_tag(json_data.get("tags", []), "color")
@@ -57,7 +127,7 @@ def fetch_shopify_product(product_url: str) -> dict:
         raw_tags = [t.strip() for t in raw_tags.split(",")]
     product_type = json_data.get("product_type", "")
     category = detect_category(json_data["title"], product_type=product_type, tags=raw_tags)
-    print(f"[FASHION-] Category: {category} (type='{product_type}')")
+    logger.info(f"Category: {category} (type='{product_type}')")
 
     # Pricing
     original_price = None
@@ -76,32 +146,34 @@ def fetch_shopify_product(product_url: str) -> dict:
 
     discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
 
-    # Images
+    # ── Images ────────────────────────────────────────────────────
+    # For AFEW: scrape high-res packshots from their custom CDN
+    # For other Shopify stores: use API images as before
+
     all_image_urls = []
-    seen = set()
 
-    for img in json_data.get("images", []):
-        url = img.get("src", "")
-        if url:
-            norm = _normalize_image_url(url)
-            if norm not in seen:
-                seen.add(norm)
-                all_image_urls.append(url)
+    if is_afew:
+        time.sleep(0.3)  # Be nice
+        cdn_images = _scrape_afew_cdn_images(product_url)
+        if cdn_images:
+            all_image_urls = cdn_images
+            logger.info(f"Using {len(cdn_images)} AFEW CDN packshot images")
 
-    if js_data:
-        for img in js_data.get("images", []):
-            url = img if isinstance(img, str) else img.get("src", "")
+    # Fallback (or non-AFEW Shopify stores): use API images
+    if not all_image_urls:
+        seen = set()
+
+        for img in json_data.get("images", []):
+            url = img.get("src", "")
             if url:
-                if url.startswith("//"):
-                    url = "https:" + url
                 norm = _normalize_image_url(url)
                 if norm not in seen:
                     seen.add(norm)
                     all_image_urls.append(url)
 
-        for m in js_data.get("media", []):
-            if m.get("media_type") == "image":
-                url = m.get("src") or (m.get("preview_image", {}) or {}).get("src", "")
+        if js_data:
+            for img in js_data.get("images", []):
+                url = img if isinstance(img, str) else img.get("src", "")
                 if url:
                     if url.startswith("//"):
                         url = "https:" + url
@@ -110,10 +182,23 @@ def fetch_shopify_product(product_url: str) -> dict:
                         seen.add(norm)
                         all_image_urls.append(url)
 
+            for m in js_data.get("media", []):
+                if m.get("media_type") == "image":
+                    url = m.get("src") or (m.get("preview_image", {}) or {}).get("src", "")
+                    if url:
+                        if url.startswith("//"):
+                            url = "https:" + url
+                        norm = _normalize_image_url(url)
+                        if norm not in seen:
+                            seen.add(norm)
+                            all_image_urls.append(url)
+
+        logger.info(f"Using {len(all_image_urls)} Shopify API images (fallback)")
+
     images = [{"url": url, "alt": f"{json_data['title']} - image {i+1}"}
               for i, url in enumerate(all_image_urls)]
 
-    print(f"[FASHION-] Images: {len(all_image_urls)} found")
+    logger.info(f"Images: {len(all_image_urls)} total")
 
     # Sizes & availability (convert to EU)
     js_avail = {}
@@ -143,7 +228,7 @@ def fetch_shopify_product(product_url: str) -> dict:
 
     in_stock_count = sum(1 for s in sizes if s["in_stock"])
     any_in_stock = in_stock_count > 0
-    print(f"[FASHION-] Sizes: {in_stock_count}/{len(sizes)} in stock (converted to EU)")
+    logger.info(f"Sizes: {in_stock_count}/{len(sizes)} in stock (converted to EU)")
 
     return {
         "name": json_data["title"],
