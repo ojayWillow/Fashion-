@@ -16,13 +16,17 @@ last_result = None
 
 
 def check_shopify_product(product_url: str, handle: str) -> dict:
-    """Check stock for a single Shopify product. Raises on HTTP errors."""
-    base = product_url.split("/products/")[0]
-    json_url = f"{base}/products/{handle}.json"
+    """Check stock for a single Shopify product.
 
-    resp = requests.get(json_url, timeout=15)
+    Uses the .js endpoint because .json does NOT include the
+    `available` field for many Shopify stores (returns None).
+    """
+    base = product_url.split("/products/")[0]
+    js_url = f"{base}/products/{handle}.js"
+
+    resp = requests.get(js_url, timeout=15)
     resp.raise_for_status()
-    data = resp.json()["product"]
+    data = resp.json()
 
     sizes = []
     for v in data.get("variants", []):
@@ -42,7 +46,7 @@ def check_shopify_product(product_url: str, handle: str) -> dict:
 def run_stock_check():
     """Check all products and update the database.
 
-    - Shopify products: auto-checked via .json endpoint
+    - Shopify products: auto-checked via .js endpoint
     - Non-Shopify products: skipped, flagged for manual review
     - 404 responses: product marked as offline/removed
     """
@@ -84,8 +88,6 @@ def run_stock_check():
 
         # --- Shopify: auto-check ---
         try:
-            # Extract the actual Shopify handle from the product URL
-            # (the slug in the DB may differ from the real Shopify handle)
             handle = p["product_url"].rstrip("/").split("/products/")[-1].split("?")[0]
             result = check_shopify_product(p["product_url"], handle)
             checked += 1
@@ -116,7 +118,6 @@ def run_stock_check():
 
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code == 404:
-                # Product removed from store
                 offline += 1
                 conn.execute(
                     "UPDATE products SET in_stock = 0, last_checked = ?, updated_at = ? WHERE id = ?",
