@@ -32,6 +32,28 @@ def init_db():
         conn.execute("ALTER TABLE product_sizes ADD COLUMN size_original TEXT")
         conn.commit()
         print("[FASHION-] Added 'size_original' column to product_sizes table")
+    # Add status + fail_count columns if upgrading
+    try:
+        conn.execute("SELECT status FROM products LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE products ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+        conn.commit()
+        print("[FASHION-] Added 'status' column to products table")
+    try:
+        conn.execute("SELECT fail_count FROM products LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE products ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+        print("[FASHION-] Added 'fail_count' column to products table")
+    # Fix END Clothing shipping cost if it was seeded with old value
+    conn.execute(
+        "UPDATE stores SET shipping_cost = 11.99 WHERE base_url = 'https://www.endclothing.com' AND shipping_cost != 11.99"
+    )
+    # Remove incorrect free_ship_min for END (they don't offer free shipping)
+    conn.execute(
+        "UPDATE stores SET free_ship_min = NULL WHERE base_url = 'https://www.endclothing.com'"
+    )
+    conn.commit()
     conn.close()
     print(f"Database initialized at {DB_PATH}")
 
@@ -102,6 +124,8 @@ def get_all_products(conn: sqlite3.Connection, filters: dict = None) -> list:
     if filters:
         if filters.get("in_stock"):
             query += " AND p.in_stock = 1"
+        # Never show removed products (confirmed dead)
+        query += " AND p.status != 'removed'"
         if filters.get("brand"):
             query += " AND p.brand = ?"
             params.append(filters["brand"])

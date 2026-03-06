@@ -11,70 +11,13 @@ import time
 import requests
 from urllib.parse import urlparse
 from utils.size_converter import convert_to_eu
+from utils.category_detector import detect_category
+from utils.http_retry import request_with_retry
 
 SESSION = requests.Session()
 SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 })
-
-# Category detection keywords
-_TODDLER_WORDS = ['toddler', 'infant', 'baby', ' td ', ' td', 'td ', 'crib']
-_KIDS_WORDS = ['kids', 'junior', 'youth', 'gs ', ' gs', 'grade school', 'big kid', 'little kid']
-_CLOTHING_WORDS = ['hoodie', 'jacket', 'shirt', 't-shirt', 'tee', 'pants', 'jogger', 'shorts', 'sweater', 'crewneck', 'crew neck', 'pullover', 'vest', 'coat', 'parka', 'windbreaker', 'tracksuit', 'sweatshirt', 'sweatpant', 'jersey', 'polo', 'cardigan', 'fleece', 'puffer', 'anorak', 'dress', 'skirt', 'legging', 'trouser', 'cargo', 'denim', 'jeans', 'tank top', 'longsleeve', 'apparel', 'clothing']
-_ACCESSORY_WORDS = ['cap', 'hat', 'beanie', 'bag', 'backpack', 'wallet', 'belt', 'sock', 'scarf', 'glove', 'sunglasses', 'watch', 'keychain', 'headband', 'wristband', 'accessory', 'accessories', 'case', 'pouch', 'tote', 'duffle']
-_SNEAKER_WORDS = ['sneaker', 'shoe', 'footwear', 'runner', 'trainer', 'boot', 'slide', 'sandal', 'clog', 'mule', 'slipper', 'foam', 'dunk', 'jordan', 'air max', 'gel-', 'chuck', '550', '530', '2002r', '990', '1906', 'ultraboost', 'ozweego', 'forum', 'samba', 'gazelle', 'campus', 'old skool', 'sk8', 'classic leather']
-
-
-def _detect_category(name: str, product_type: str, tags: list) -> str:
-    """Auto-detect product category from Shopify metadata."""
-    text = f" {name} {product_type} {' '.join(tags)} ".lower()
-
-    if any(w in text for w in _TODDLER_WORDS):
-        return 'toddler'
-    if any(w in text for w in _KIDS_WORDS):
-        return 'kids'
-
-    ptype = product_type.lower().strip()
-    if ptype in ['footwear', 'shoes', 'sneakers']:
-        return 'sneakers'
-    if ptype in ['apparel', 'clothing', 'tops', 'bottoms', 'outerwear']:
-        return 'clothing'
-    if ptype in ['accessories', 'bags', 'hats', 'socks']:
-        return 'accessories'
-
-    for tag in tags:
-        tl = tag.lower()
-        if tl.startswith('type:'):
-            val = tl.split(':', 1)[1].strip()
-            if val in ['footwear', 'shoes', 'sneakers', 'sneaker']:
-                return 'sneakers'
-            if val in ['apparel', 'clothing', 'tops', 'bottoms']:
-                return 'clothing'
-            if val in ['accessories', 'accessory']:
-                return 'accessories'
-
-    if any(w in text for w in _ACCESSORY_WORDS):
-        return 'accessories'
-    if any(w in text for w in _CLOTHING_WORDS):
-        return 'clothing'
-    if any(w in text for w in _SNEAKER_WORDS):
-        return 'sneakers'
-
-    return 'sneakers'
-
-
-def _request_with_retry(url: str, max_retries: int = 3) -> requests.Response:
-    for attempt in range(max_retries):
-        resp = SESSION.get(url, timeout=15)
-        if resp.status_code == 429:
-            wait = (attempt + 1) * 3
-            print(f"[FASHION-] Rate limited, waiting {wait}s... (attempt {attempt + 1}/{max_retries})")
-            time.sleep(wait)
-            continue
-        resp.raise_for_status()
-        return resp
-    resp.raise_for_status()
-    return resp
 
 
 def fetch_shopify_product(product_url: str) -> dict:
@@ -86,7 +29,8 @@ def fetch_shopify_product(product_url: str) -> dict:
 
     # Fetch .json (main data)
     json_url = f"{base_url}/products/{handle}.json"
-    resp = _request_with_retry(json_url)
+    resp = request_with_retry(json_url, session=SESSION)
+    resp.raise_for_status()
     json_data = resp.json()["product"]
 
     # Fetch .js (availability)
@@ -94,7 +38,8 @@ def fetch_shopify_product(product_url: str) -> dict:
     try:
         time.sleep(0.5)
         js_url = f"{base_url}/products/{handle}.js"
-        js_resp = _request_with_retry(js_url)
+        js_resp = request_with_retry(js_url, session=SESSION)
+        js_resp.raise_for_status()
         js_data = js_resp.json()
     except Exception as e:
         print(f"[FASHION-] Could not fetch .js endpoint: {e}")
@@ -111,7 +56,7 @@ def fetch_shopify_product(product_url: str) -> dict:
     if isinstance(raw_tags, str):
         raw_tags = [t.strip() for t in raw_tags.split(",")]
     product_type = json_data.get("product_type", "")
-    category = _detect_category(json_data["title"], product_type, raw_tags)
+    category = detect_category(json_data["title"], product_type=product_type, tags=raw_tags)
     print(f"[FASHION-] Category: {category} (type='{product_type}')")
 
     # Pricing
@@ -226,7 +171,7 @@ def check_product_still_online(product_url: str) -> dict:
     handle = parsed.path.rstrip("/").split("/")[-1]
 
     try:
-        resp = SESSION.get(f"{base_url}/products/{handle}.js", timeout=10)
+        resp = request_with_retry(f"{base_url}/products/{handle}.js", session=SESSION, timeout=10)
         if resp.status_code == 404:
             return {"online": False, "in_stock": False, "sizes_available": 0, "sizes_total": 0}
         resp.raise_for_status()
