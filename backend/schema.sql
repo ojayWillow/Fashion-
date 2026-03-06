@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS products (
 
     -- Stock
     in_stock        INTEGER NOT NULL DEFAULT 1,
+    status          TEXT NOT NULL DEFAULT 'active',
+    fail_count      INTEGER NOT NULL DEFAULT 0,
     last_checked    TEXT,
 
     -- Display
@@ -81,6 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_products_store ON products(store_id);
 CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand);
 CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);
 CREATE INDEX IF NOT EXISTS idx_products_in_stock ON products(in_stock);
+CREATE INDEX IF NOT EXISTS idx_products_status ON products(status);
 CREATE INDEX IF NOT EXISTS idx_products_discount ON products(discount_pct DESC);
 CREATE INDEX IF NOT EXISTS idx_product_sizes_product ON product_sizes(product_id);
 CREATE INDEX IF NOT EXISTS idx_product_sizes_label ON product_sizes(size_label);
@@ -91,4 +94,4 @@ CREATE INDEX IF NOT EXISTS idx_stock_checks_product ON stock_checks(product_id);
 INSERT OR IGNORE INTO stores (name, base_url, platform, shipping_cost, free_ship_min)
 VALUES
     ('AFEW Store', 'https://en.afew-store.com', 'shopify', 7.99, 250.00),
-    ('END Clothing', 'https://www.endclothing.com', 'custom', 9.99, 250.00);
+    ('END Clothing', 'https://www.endclothing.com', 'custom', 11.99, NULL);
