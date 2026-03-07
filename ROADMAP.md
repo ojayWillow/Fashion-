@@ -31,8 +31,8 @@
 - [x] Mark products as offline/removed on 404
 - [x] Manual trigger: `POST /api/stock-check/trigger`
 - [x] Status endpoint: `GET /api/stock-check/status`
-- [ ] Stock change history
-- [ ] Notification when item comes back in stock
+- [x] Safety: 3 consecutive failures before marking unavailable
+- [x] Stock check history logged to `stock_checks` table
 
 ### Phase 5: END Clothing Support
 - [x] END Clothing fetcher via Algolia search proxy
@@ -42,7 +42,7 @@
 - [x] curl_cffi for TLS fingerprint spoofing
 - [x] 3-strategy SKU lookup: URL SKU → HTML LD+JSON SKU → product name search
 - [x] Correct size availability: `footwear_size_label` = available sizes only
-- [ ] Wire END into stock checker (currently skipped)
+- [x] END wired into stock checker via Algolia re-query
 
 ### Phase 6: Image Quality
 - [x] AFEW CDN packshot scraping (5-6 high-res images vs 1 Shopify thumbnail)
@@ -67,20 +67,23 @@
 - [x] Real-time availability from `.js` endpoint
 - [x] `debug_sns.py` diagnostic script
 - [x] SNS added to `refresh_sizes.py`
+- [x] SNS wired into stock checker (uses Shopify platform handler)
+
+### Phase 9: Multi-Store Stock Checker
+- [x] Shopify stock check via `.js` endpoint (AFEW, SNS)
+- [x] END stock check via Algolia re-query
+- [x] Dispatcher pattern: `check_product_stock()` routes by platform
+- [x] Per-size stock updates (variant_id for Shopify, size_label for END)
+- [x] END shipping cost correct in schema seed (€11.99)
+- [x] SNS store seeded (free shipping)
 
 ## In Progress 🚧
 
-### Phase 9: UI Polish
+### Phase 10: UI Polish
 - [ ] Show sizes on catalogue cards (at-a-glance)
 - [ ] Improve visual design / theme options
 - [ ] Mobile responsiveness improvements
 - [ ] Product count per filter
-
-### Phase 10: Stock Checker Alignment
-- [ ] Wire END products into stock checker (Algolia re-check)
-- [ ] Wire SNS products into stock checker
-- [ ] Fix shipping cost in `schema.sql` seed (END: 9.99 → 11.99)
-- [ ] Extract shared `category_detector.py` (remove duplication)
 
 ## Planned 📋
 
@@ -96,3 +99,4 @@
 - [ ] Bulk import from store sale pages
 - [ ] Search by product name
 - [ ] Cross-store price comparison (using EAN/GTIN matching)
+- [ ] Stock change notifications (back in stock alerts)
