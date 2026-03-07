@@ -3,7 +3,7 @@
 Naked Copenhagen runs on Shopify but blocks the public .json and .js endpoints.
 Instead, we parse the HTML page to extract:
 - JSON-LD structured data (schema.org Product)
-- Shopify product data embedded in JavaScript (with DKK prices)
+- Shopify product/variant data embedded in JavaScript (prices in DKK)
 - Images and product metadata
 
 Note: Prices are in Danish Krone (DKK), not EUR.
@@ -27,8 +27,7 @@ SESSION.headers.update({
     "Accept-Language": "en-US,en;q=0.5",
 })
 
-# DKK to EUR approximate conversion (for display purposes)
-# Note: You should use a real-time exchange rate API in production
+# DKK to EUR conversion
 DKK_TO_EUR = 0.134
 
 
@@ -76,18 +75,16 @@ def fetch_naked_product(product_url: str) -> dict:
     brand = json_ld.get('brand', {}).get('name', 'Unknown Brand') if isinstance(json_ld.get('brand'), dict) else json_ld.get('brand', 'Unknown Brand')
     description = json_ld.get('description', '')
 
-    # Images from JSON-LD (can be string, list of strings, or list of dicts)
+    # Images from JSON-LD
     images = []
     json_ld_images = json_ld.get('image', [])
     
-    # Normalize to list
     if isinstance(json_ld_images, str):
         json_ld_images = [json_ld_images]
     elif isinstance(json_ld_images, dict):
         json_ld_images = [json_ld_images]
     
     for i, img_item in enumerate(json_ld_images):
-        # Extract URL from string or dict format
         if isinstance(img_item, str):
             img_url = img_item
         elif isinstance(img_item, dict):
@@ -98,7 +95,6 @@ def fetch_naked_product(product_url: str) -> dict:
         if not img_url:
             continue
             
-        # Fix protocol-relative URLs
         if img_url.startswith('//'):
             img_url = 'https:' + img_url
         
@@ -106,103 +102,64 @@ def fetch_naked_product(product_url: str) -> dict:
 
     logger.info(f"Images from JSON-LD: {len(images)}")
 
-    # Extract currency from meta tag or shop config
-    currency = 'DKK'  # Default for Naked Copenhagen
+    # Get currency
+    currency = 'DKK'
     meta_currency = soup.find('meta', {'property': 'og:price:currency'})
     if meta_currency:
         currency = meta_currency.get('content', 'DKK')
     logger.info(f"Currency: {currency}")
 
-    # CRITICAL: Extract full product data with pricing
-    # Look for the complete product object that has compare_at_price at product level
-    product_data = None
+    # Extract variant data for sizes and SKU
+    variant_data = None
     for script in soup.find_all('script'):
-        if not script.string:
-            continue
-        
-        # Look for product object with compare_at_price fields
-        match = re.search(r'"product"\s*:\s*\{([^}]*"compare_at_price"[^}]*\})', script.string, re.DOTALL)
-        if match:
-            # Extract the full product JSON
-            # Need to find the complete object, not just snippet
-            product_match = re.search(r'"product"\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*"compare_at_price"(?:[^{}]|\{[^{}]*\})*\})', script.string, re.DOTALL)
-            if product_match:
+        if script.string and '"variants"' in script.string:
+            match = re.search(r'"variants"\s*:\s*(\[[^\]]+\])', script.string)
+            if match:
                 try:
-                    product_json = product_match.group(1)
-                    # Fix any truncation by finding the closing brace properly
-                    # This is a simplified approach - may need refinement
-                    brace_count = 0
-                    end_pos = 0
-                    for i, char in enumerate(product_json):
-                        if char == '{':
-                            brace_count += 1
-                        elif char == '}':
-                            brace_count -= 1
-                            if brace_count == 0:
-                                end_pos = i + 1
-                                break
-                    
-                    if end_pos > 0:
-                        product_json = product_json[:end_pos]
-                        product_data = json.loads(product_json)
-                        logger.info(f"Found complete product data with pricing")
-                        break
-                except (json.JSONDecodeError, ValueError) as e:
-                    logger.debug(f"Failed to parse product JSON: {e}")
+                    variant_data = json.loads(match.group(1))
+                    logger.info(f"Found {len(variant_data)} variants")
+                    break
+                except json.JSONDecodeError:
                     continue
 
-    if not product_data:
-        raise ValueError("Could not find complete product data with pricing")
+    if not variant_data or len(variant_data) == 0:
+        raise ValueError("Could not find variant data")
 
-    # Get prices from product-level fields (in cents)
-    sale_price_cents = product_data.get('price', 0)
-    original_price_cents = product_data.get('compare_at_price') or product_data.get('compare_at_price_max') or sale_price_cents
+    # Get price from first variant (in cents)
+    first_variant = variant_data[0]
+    sale_price_cents = first_variant.get('price', 0)
+    
+    # Find compare_at_price anywhere in the HTML using simple regex
+    original_price_cents = sale_price_cents  # Default to sale price
+    compare_match = re.search(r'"compare_at_price"\s*:\s*(\d+)', html)
+    if compare_match:
+        original_price_cents = int(compare_match.group(1))
+        logger.info(f"Found compare_at_price: {original_price_cents}")
+    else:
+        logger.warning("No compare_at_price found, using sale price as original")
 
-    # Convert from cents to currency units
+    # Convert from cents to currency
     sale_price = sale_price_cents / 100.0
     original_price = original_price_cents / 100.0
 
-    # Convert to EUR if needed
+    logger.info(f"Raw prices: sale={sale_price} {currency}, original={original_price} {currency}")
+
+    # Convert DKK to EUR
     if currency == 'DKK':
         sale_price_eur = round(sale_price * DKK_TO_EUR, 2)
         original_price_eur = round(original_price * DKK_TO_EUR, 2)
-        logger.info(f"Pricing: {sale_price} DKK (~{sale_price_eur} EUR), original: {original_price} DKK (~{original_price_eur} EUR)")
-        # Use EUR for storage
+        logger.info(f"Converted to EUR: sale={sale_price_eur}, original={original_price_eur}")
         sale_price = sale_price_eur
         original_price = original_price_eur
-    else:
-        logger.info(f"Pricing: {sale_price} {currency}, original: {original_price} {currency}")
 
     discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
-    logger.info(f"Discount: {discount_pct}%")
 
-    # Extract variants for sizes
-    # First try from product_data
-    variant_data = product_data.get('variants', [])
-    
-    # If variants in product_data don't have full info, look for simpler variant array
-    if not variant_data or len(variant_data) == 0:
-        for script in soup.find_all('script'):
-            if script.string and '"variants"' in script.string:
-                match = re.search(r'"variants"\s*:\s*(\[[^\]]+\])', script.string)
-                if match:
-                    try:
-                        variant_data = json.loads(match.group(1))
-                        logger.info(f"Found {len(variant_data)} variants")
-                        break
-                    except json.JSONDecodeError:
-                        continue
-
-    if not variant_data or len(variant_data) == 0:
-        raise ValueError("Could not find variant data for sizes")
-
-    # Extract sizes and availability from variant data
+    # Extract sizes from variants
     sizes = []
     for variant in variant_data:
-        size_label = variant.get('option1') or variant.get('public_title') or variant.get('title', '?')
+        size_label = variant.get('public_title') or variant.get('option1') or variant.get('title', '?')
         available = variant.get('available', False)
         variant_id = str(variant.get('id', ''))
-        sku = variant.get('sku', '')
         
         sizes.append({
             "label": size_label,
@@ -215,45 +172,38 @@ def fetch_naked_product(product_url: str) -> dict:
     any_in_stock = in_stock_count > 0
     logger.info(f"Sizes: {in_stock_count}/{len(sizes)} in stock")
 
-    # Detect category from product type or title
-    product_type = product_data.get('type') or soup.find('meta', {'property': 'og:type'})
-    if isinstance(product_type, str):
-        product_type_str = product_type
-    else:
-        product_type_str = product_type.get('content', '') if product_type else ''
+    # Get product type and tags
+    product_type_str = ''
+    type_match = re.search(r'"type"\s*:\s*"([^"]+)"', html)
+    if type_match:
+        product_type_str = type_match.group(1)
     
-    # Try to get tags from product data or meta keywords
-    tags = product_data.get('tags', [])
-    if not tags:
-        meta_keywords = soup.find('meta', {'name': 'keywords'})
-        tags = meta_keywords.get('content', '').split(',') if meta_keywords else []
-    tags = [t.strip() for t in tags] if isinstance(tags, list) else []
+    tags = []
+    tags_match = re.search(r'"tags"\s*:\s*\[([^\]]+)\]', html)
+    if tags_match:
+        tags_str = tags_match.group(1)
+        tags = [t.strip('" ') for t in tags_str.split(',')]
 
     category = detect_category(name, product_type=product_type_str, tags=tags)
     logger.info(f"Category: {category}")
 
-    # Detect gender for size conversion
     gender = detect_gender_from_tags(tags=tags, name=name)
     logger.info(f"Gender: {gender}")
 
-    # Convert sizes to EU if needed
+    # Convert sizes to EU
     for size in sizes:
         eu_label = convert_to_eu(size["original_label"], category, gender=gender)
         size["label"] = eu_label
 
-    # Extract colorway from title or tags
+    # Extract colorway
     colorway = None
-    title_parts = name.split('|')
-    if len(title_parts) > 1:
-        colorway = title_parts[-1].strip()
-    # Also try splitting by dash or hyphen
-    if not colorway and ' - ' in name:
+    if ' - ' in name:
         parts = name.split(' - ')
         if len(parts) > 1:
             colorway = parts[-1].strip()
 
-    # Get SKU from first variant
-    sku = variant_data[0].get('sku') if variant_data else None
+    # Get SKU
+    sku = first_variant.get('sku')
 
     return {
         "name": name,
@@ -287,7 +237,6 @@ def check_product_still_online(product_url: str) -> dict:
         html = resp.text
         soup = BeautifulSoup(html, 'lxml')
 
-        # Quick check for JSON-LD to see if product exists
         has_product = False
         for script in soup.find_all('script', {'type': 'application/ld+json'}):
             try:
@@ -301,7 +250,6 @@ def check_product_still_online(product_url: str) -> dict:
         if not has_product:
             return {"online": False, "in_stock": False, "sizes_available": 0, "sizes_total": 0}
 
-        # Try to count available sizes
         variant_data = None
         for script in soup.find_all('script'):
             if script.string and 'variants' in script.string:
@@ -323,7 +271,6 @@ def check_product_still_online(product_url: str) -> dict:
                 "sizes_total": total,
             }
         
-        # Fallback: assume online but unknown stock
         return {"online": True, "in_stock": True, "sizes_available": 0, "sizes_total": 0}
 
     except requests.exceptions.HTTPError as e:
