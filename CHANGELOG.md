@@ -2,6 +2,26 @@
 
 All notable changes to FASHION- are documented here.
 
+## [0.5.0] - 2026-03-07
+
+### Fixed
+- **END size availability** — `footwear_size_label` only contains available sizes (sold-out sizes are removed by END). All sizes in the array are now correctly marked as in-stock instead of guessing from `sku_stock` offsets
+- **END SKU lookup** — new 3-strategy fallback: URL SKU → HTML LD+JSON SKU → product name search. Fixes products where END changed the SKU (e.g. Jordan 11 Retro: URL has `FV1565-101` but real SKU is `IH0296-400`)
+- **Gender detection false positive** — `detect_gender_from_tags` used loose substring matching (`' w'`, `'w '`) which matched words like `low` in product names (e.g. "Air Force 1 **Low** x Kobe" → detected as women's). Fixed with word-boundary regex (`\bwmns\b`, `\bwomens\b`, etc.)
+- **SNS size conversion** — sizes were shifted by ~2 EU sizes on products with no gender tags (default was `unisex` → now defaults to `men` since most sneakers use men's sizing)
+
+### Added
+- **SNS store support** in `refresh_sizes.py` — re-fetches from `.json`/`.js` endpoints with corrected gender detection
+- **`_find_product_in_algolia()`** — unified search function for END with 3 strategies (URL SKU, HTML SKU, product name)
+- **`_extract_product_name_from_url()`** — extracts human-readable name from END URL slugs for name-based search fallback
+- **`debug_sns.py`** — diagnostic script comparing SNS `.json` vs `.js` variant data with size conversion preview
+
+### Changed
+- `refresh_sizes.py` now supports all 3 stores: `--store afew`, `--store end`, `--store sns`
+- `detect_gender_from_tags()` default changed from `unisex` to `men`
+- `convert_to_eu()` default gender changed from `unisex` to `men`
+- END `_parse_sizes()` rewritten: trusts `footwear_size_label` as source of truth, matches non-zero `sku_stock` entries to labels for quantity counts
+
 ## [0.4.0] - 2026-03-05
 
 ### Added

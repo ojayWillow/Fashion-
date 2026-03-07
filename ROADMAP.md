@@ -40,6 +40,8 @@
 - [x] Per-size stock counts from Algolia `sku_stock`
 - [x] LD+JSON fallback when Algolia fails
 - [x] curl_cffi for TLS fingerprint spoofing
+- [x] 3-strategy SKU lookup: URL SKU → HTML LD+JSON SKU → product name search
+- [x] Correct size availability: `footwear_size_label` = available sizes only
 - [ ] Wire END into stock checker (currently skipped)
 
 ### Phase 6: Image Quality
@@ -53,33 +55,44 @@
 - [x] Detect gender from product name keywords (WMNS, GS, TD)
 - [x] Women's US → EU table (US 5 = EU 35.5, not 37.5)
 - [x] Kids and Toddler conversion tables
-- [x] `refresh_sizes.py` script for existing products
+- [x] `refresh_sizes.py` script for all 3 stores (AFEW, END, SNS)
 - [x] END Clothing gender detection from Algolia field
+- [x] Word-boundary regex for gender keywords (fixed "Low" → women's false positive)
+- [x] Default to men's sizing when no gender info available
+
+### Phase 8: SNS (Sneakersnstuff) Support
+- [x] SNS fetcher via Shopify API with curl_cffi anti-bot bypass
+- [x] US → EU size conversion with correct gender detection
+- [x] EAN/GTIN extraction from LD+JSON for cross-store matching
+- [x] Real-time availability from `.js` endpoint
+- [x] `debug_sns.py` diagnostic script
+- [x] SNS added to `refresh_sizes.py`
 
 ## In Progress 🚧
 
-### Phase 8: UI Polish
+### Phase 9: UI Polish
 - [ ] Show sizes on catalogue cards (at-a-glance)
 - [ ] Improve visual design / theme options
 - [ ] Mobile responsiveness improvements
 - [ ] Product count per filter
 
-### Phase 9: Stock Checker Alignment
+### Phase 10: Stock Checker Alignment
 - [ ] Wire END products into stock checker (Algolia re-check)
-- [ ] Store `variant_id` for END sizes (currently `None`)
+- [ ] Wire SNS products into stock checker
 - [ ] Fix shipping cost in `schema.sql` seed (END: 9.99 → 11.99)
 - [ ] Extract shared `category_detector.py` (remove duplication)
 
 ## Planned 📋
 
-### Phase 10: Multi-user & Deploy
+### Phase 11: Multi-user & Deploy
 - [ ] Admin authentication
 - [ ] Deploy to Railway/Render
 - [ ] Persistent storage (not just local SQLite)
 
-### Phase 11: Advanced Features
+### Phase 12: Advanced Features
 - [ ] Price history tracking
 - [ ] Wishlist / saved items
 - [ ] Email alerts for price drops
 - [ ] Bulk import from store sale pages
 - [ ] Search by product name
+- [ ] Cross-store price comparison (using EAN/GTIN matching)

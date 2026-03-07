@@ -1,6 +1,6 @@
 # FASHION-
 
-Curated streetwear deals aggregator. Tracks sale items from stores like AFEW Store and END Clothing, showing prices, sizes, stock status, and shipping costs to Latvia.
+Curated streetwear deals aggregator. Tracks sale items from stores like AFEW Store, END Clothing, and Sneakersnstuff, showing prices, sizes, stock status, and shipping costs to Latvia.
 
 ## Architecture
 
@@ -20,14 +20,17 @@ backend/           → Python FastAPI server
   models.py        → Pydantic request/response models
   stock_checker.py → Scheduled stock verification (every 30 min)
   refresh_images.py→ Re-scrape AFEW CDN images for existing products
-  refresh_sizes.py → Re-convert sizes with correct gender detection
+  refresh_sizes.py → Re-fetch & re-convert sizes for all stores (AFEW, END, SNS)
+  debug_sns.py     → SNS diagnostic: compare .json vs .js availability
   fetchers/
     shopify.py     → Fetch from Shopify .json + .js APIs + AFEW CDN images
     end_clothing.py→ END Clothing product processor + category detection
-    _end_worker.py → END data fetcher via Algolia search proxy
+    _end_worker.py → END data fetcher via Algolia search proxy (3-strategy SKU lookup)
+    sns.py         → SNS product processor (US→EU conversion, EAN/GTIN extraction)
+    _sns_worker.py → SNS data fetcher via Shopify API with curl_cffi
     manual.py      → Build product from manual input
   utils/
-    size_converter.py  → Gender-aware UK/US → EU size conversion
+    size_converter.py  → Gender-aware UK/US → EU size conversion (word-boundary regex)
     category_detector.py → Auto-detect product category
     http_retry.py  → HTTP requests with retry + backoff
 
@@ -49,7 +52,7 @@ Open http://localhost:8000
 
 ### Adding Products
 1. Go to http://localhost:8000/admin
-2. Choose a tab: **Shopify (AFEW)**, **END Clothing**, or **Manual**
+2. Choose a tab: **Shopify (AFEW)**, **END Clothing**, **SNS**, or **Manual**
 3. Paste the product URL and submit
 4. The system auto-fetches: name, brand, images, sizes, availability, pricing
 5. Category is **auto-detected** (sneakers, clothing, kids, etc.)
@@ -66,11 +69,22 @@ Open http://localhost:8000
 
 **END Clothing (Algolia)**
 - Queries END's Algolia search proxy (`search1web.endclothing.com`)
+- 3-strategy product lookup: URL SKU → HTML LD+JSON SKU → product name search
+- `footwear_size_label` array = available sizes only (sold-out sizes removed by END)
 - Returns: name, brand, SKU, all sizes with per-size stock counts, prices per region (EU/GB/US), 6 product images, colorway, categories
-- No Playwright or browser cookies needed — pure HTTP
+- No Playwright or browser cookies needed — pure HTTP via `curl_cffi`
 - Fallback: LD+JSON scrape from product page HTML
 - Gender detection from Algolia `gender` field
 - Shipping: €11.99 to Latvia
+
+**Sneakersnstuff / SNS (Shopify)**
+- `/en-eu/products/{handle}.json` — product data, pricing, tags
+- `/en-eu/products/{handle}.js` — real-time variant availability
+- HTML LD+JSON — EAN/GTIN data for cross-store matching
+- Sizes in US format, converted to EU using gender-aware tables
+- Gender detection from Shopify tags, defaults to men's when ambiguous
+- Uses `curl_cffi` for anti-bot bypass
+- Shipping: free to Latvia
 
 ### Images
 
@@ -81,17 +95,21 @@ Open http://localhost:8000
 
 **END** images come from Algolia (8-12 per product, already high quality).
 
+**SNS** images come from standard Shopify CDN.
+
 ### Size Conversion
 
 All sizes are converted to EU format. The converter is **gender-aware**:
 - Detects gender from store tags (`gender:Women`, `gender:Men`) and product name keywords (`WMNS`, `GS`, `TD`)
+- Uses **word-boundary regex** to avoid false positives (e.g. "Low" no longer matches women's `w` pattern)
+- Defaults to **men's** sizing when no gender info is available (standard in sneaker industry)
 - Women's US 5 = EU 35.5 (men's US 5 = EU 37.5)
 - Supports: US Men's, US Women's, UK, Kids, Toddler → EU
 - Clothing sizes (S/M/L/XL) pass through unchanged
 
 ### Stock Checker
 - Runs automatically every 30 minutes via APScheduler
-- Shopify products: checked via `.js` endpoint
+- Shopify products (AFEW, SNS): checked via `.js` endpoint
 - END products: skipped (flagged for manual review — needs Algolia re-check)
 - 404 responses: product marked as offline/removed
 - Manual trigger: `POST /api/stock-check/trigger`
@@ -115,9 +133,12 @@ Detects from product metadata, tags, and name keywords:
 
 ```bash
 cd backend
-python refresh_images.py          # Re-scrape AFEW CDN images for all products
-python refresh_sizes.py            # Re-convert sizes with correct gender detection
-python refresh_images.py --store all  # Refresh all stores (AFEW + END)
+python refresh_images.py              # Re-scrape AFEW CDN images for all products
+python refresh_sizes.py               # Re-fetch & re-convert sizes (all stores)
+python refresh_sizes.py --store afew  # AFEW only
+python refresh_sizes.py --store end   # END only
+python refresh_sizes.py --store sns   # SNS only
+python debug_sns.py <URL>             # Debug SNS variant data for a product
 ```
 
 ## API Endpoints
@@ -128,6 +149,7 @@ python refresh_images.py --store all  # Refresh all stores (AFEW + END)
 | GET | /api/products/{slug} | Product detail |
 | POST | /api/products/shopify | Add product from Shopify URL |
 | POST | /api/products/end | Add product from END Clothing URL |
+| POST | /api/products/sns | Add product from SNS URL |
 | POST | /api/products/manual | Add product manually |
 | PATCH | /api/products/{slug} | Edit product fields |
 | DELETE | /api/products/{slug} | Delete product |
@@ -144,3 +166,4 @@ python refresh_images.py --store all  # Refresh all stores (AFEW + END)
 |-------|---------------|---------------|----------|
 | AFEW Store | €7.99 | €250+ | Shopify |
 | END Clothing | €11.99 | — | Algolia API |
+| Sneakersnstuff (SNS) | Free | — | Shopify + curl_cffi |
