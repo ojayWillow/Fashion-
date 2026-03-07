@@ -133,19 +133,19 @@ def fetch_shopify_product(product_url: str) -> dict:
     gender = detect_gender_from_tags(tags=raw_tags, name=json_data["title"])
     logger.info(f"Gender: {gender}")
 
-    # Pricing
+    # Pricing - Shopify API returns prices in cents (e.g. 4500 = €45.00)
     original_price = None
     sale_price = None
     for v in json_variants:
         cap = v.get("compare_at_price")
         price = v.get("price")
         if cap and price and float(cap) > float(price):
-            original_price = float(cap)
-            sale_price = float(price)
+            original_price = float(cap) / 100.0  # Convert cents to currency units
+            sale_price = float(price) / 100.0
             break
 
     if original_price is None:
-        sale_price = float(json_variants[0]["price"])
+        sale_price = float(json_variants[0]["price"]) / 100.0
         original_price = sale_price
 
     discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
