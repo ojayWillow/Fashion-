@@ -4,6 +4,15 @@ Instead of using Playwright (blocked by Akamai), we query END's own
 Algolia search proxy at search1web.endclothing.com which returns
 complete product data: name, sizes, stock per size, prices, images.
 
+Key insight: END's Algolia `footwear_size_label` array ONLY contains
+sizes that are currently available/in-stock. Sold-out sizes are removed
+from this array by END's system. So all labels = all available sizes.
+
+The `sku_stock` dict maps internal child SKUs (e.g. IH0296-40015) to
+stock quantities. The keys are NOT size-based — the trailing digits are
+sequential IDs, not sizes. We use stock counts from the non-zero entries
+matched to labels in order.
+
 Fallback: LD+JSON from curl_cffi HTML scrape (no sizes).
 
 Requires: pip install curl_cffi
@@ -34,7 +43,7 @@ ALGOLIA_HEADERS = {
 
 MEDIA_BASE = "https://media.endclothing.com/media/catalog/product"
 
-# Website index → region.  1=GB(GBP), 2=US(USD), 3=EU(EUR)
+# Website index -> region.  1=GB(GBP), 2=US(USD), 3=EU(EUR)
 REGION_PRICE_INDEX = {
     "eu": 3, "de": 3, "fr": 3, "row": 3,
     "gb": 1,
@@ -47,7 +56,7 @@ REGION_CURRENCY = {
 }
 
 
-# ── helpers ───────────────────────────────────────────────────────
+# -- helpers -----------------------------------------------------------
 
 def _extract_region(url: str) -> str:
     parts = urlparse(url).path.strip("/").split("/")
@@ -71,6 +80,20 @@ def _extract_sku_from_url(url: str) -> Optional[str]:
     return None
 
 
+def _extract_product_name_from_url(url: str) -> Optional[str]:
+    """Extract a human-readable product name from the URL slug.
+
+    Used as a fallback search query when the SKU doesn't match in Algolia
+    (e.g. END changed the SKU but kept the same product page URL).
+    """
+    slug = urlparse(url).path.rstrip("/").split("/")[-1].replace(".html", "")
+    # Remove SKU suffix
+    slug = re.sub(r"-[a-zA-Z]{1,5}\d{3,5}-\d{2,4}$", "", slug)
+    if not slug:
+        return None
+    return slug.replace("-", " ")
+
+
 def _extract_sku_from_html(html: str) -> Optional[str]:
     """Extract SKU from LD+JSON in the raw HTML."""
     for m in re.finditer(
@@ -87,15 +110,22 @@ def _extract_sku_from_html(html: str) -> Optional[str]:
     return None
 
 
-# ── Algolia ───────────────────────────────────────────────────────
+# -- Algolia -----------------------------------------------------------
 
-def _query_algolia(sku: str) -> Optional[dict]:
-    """Query END's Algolia proxy for a product by SKU."""
+def _query_algolia(query: str, expect_sku: Optional[str] = None) -> Optional[dict]:
+    """Query END's Algolia proxy.
+
+    Args:
+        query: Search string (SKU, product name, etc.)
+        expect_sku: If provided, prefer an exact SKU match from results.
+
+    Returns the best matching hit dict, or None.
+    """
     try:
         resp = cffi_requests.post(
             ALGOLIA_URL,
             headers=ALGOLIA_HEADERS,
-            json={"query": sku, "hitsPerPage": 5},
+            json={"query": query, "hitsPerPage": 5},
             impersonate="chrome",
             timeout=15,
         )
@@ -104,15 +134,64 @@ def _query_algolia(sku: str) -> Optional[dict]:
             return None
 
         hits = resp.json().get("hits", [])
+        if not hits:
+            return None
+
         # Prefer exact SKU match
-        for h in hits:
-            if h.get("sku", "").upper() == sku.upper():
-                return h
-        return hits[0] if hits else None
+        if expect_sku:
+            for h in hits:
+                if h.get("sku", "").upper() == expect_sku.upper():
+                    return h
+
+        return hits[0]
 
     except Exception as e:
         logger.error("Algolia query failed: %s", e)
         return None
+
+
+def _find_product_in_algolia(product_url: str) -> Optional[dict]:
+    """Try multiple strategies to find a product in Algolia.
+
+    Strategy order:
+    1. SKU extracted from URL
+    2. SKU extracted from HTML LD+JSON (handles URL SKU mismatches)
+    3. Product name extracted from URL slug (broadest fallback)
+    """
+    url_sku = _extract_sku_from_url(product_url)
+
+    # Strategy 1: SKU from URL
+    if url_sku:
+        logger.info("Trying Algolia with URL SKU: %s", url_sku)
+        hit = _query_algolia(url_sku, expect_sku=url_sku)
+        if hit:
+            return hit
+        logger.info("URL SKU '%s' not found in Algolia", url_sku)
+
+    # Strategy 2: SKU from HTML LD+JSON
+    try:
+        logger.info("Fetching HTML to extract real SKU...")
+        resp = cffi_requests.get(product_url, impersonate="chrome", timeout=20)
+        if resp.status_code == 200:
+            html_sku = _extract_sku_from_html(resp.text)
+            if html_sku and html_sku.upper() != (url_sku or "").upper():
+                logger.info("HTML SKU differs from URL: %s vs %s", html_sku, url_sku)
+                hit = _query_algolia(html_sku, expect_sku=html_sku)
+                if hit:
+                    return hit
+    except Exception as e:
+        logger.warning("HTML fetch for SKU failed: %s", e)
+
+    # Strategy 3: Product name from URL slug
+    product_name = _extract_product_name_from_url(product_url)
+    if product_name:
+        logger.info("Trying Algolia with product name: '%s'", product_name)
+        hit = _query_algolia(product_name)
+        if hit:
+            logger.info("Found via name search: %s (SKU: %s)", hit.get("name"), hit.get("sku"))
+            return hit
+
+    return None
 
 
 def _build_image_urls(hit: dict) -> list[str]:
@@ -127,56 +206,46 @@ def _build_image_urls(hit: dict) -> list[str]:
 
 
 def _parse_sizes(hit: dict) -> list[dict]:
-    """Map size labels to per-SKU stock quantities."""
+    """Extract available sizes from Algolia hit.
+
+    END's Algolia `footwear_size_label` (and `size`) arrays ONLY contain
+    sizes that are currently available on the website. Sold-out sizes are
+    removed from these arrays. Therefore all labels = all in-stock sizes.
+
+    The `sku_stock` dict maps internal child SKU codes to stock quantities.
+    Keys like 'IH0296-40015' use sequential IDs, NOT the size number.
+    We extract non-zero stock counts (sorted by key) and match them to
+    labels in order to get approximate per-size quantities.
+    """
     labels = hit.get("footwear_size_label") or hit.get("size") or []
-    sku_stock = hit.get("sku_stock", {})
 
     if not labels:
         return []
 
-    stock_entries = sorted(sku_stock.items(), key=lambda x: x[0])
-    all_stocks = [v for _, v in stock_entries]
+    # Extract non-zero stock counts from sku_stock, sorted by key
+    sku_stock = hit.get("sku_stock", {})
+    nonzero_stocks = [
+        v for _, v in sorted(sku_stock.items())
+        if v > 0
+    ]
 
     sizes: list[dict] = []
+    for i, label in enumerate(labels):
+        # Match stock counts to labels in order (both are ordered by size)
+        stock_count = nonzero_stocks[i] if i < len(nonzero_stocks) else 0
 
-    if all_stocks and len(all_stocks) >= len(labels):
-        # Find offset — labels correspond to a contiguous block inside
-        # the full sku_stock list (which includes unavailable sizes = 0).
-        best_offset = 0
-        for offset in range(len(all_stocks) - len(labels) + 1):
-            chunk = all_stocks[offset : offset + len(labels)]
-            if any(x > 0 for x in chunk):
-                best_offset = offset
-                break
-
-        for i, label in enumerate(labels):
-            idx = best_offset + i
-            qty = all_stocks[idx] if idx < len(all_stocks) else 0
-            sizes.append(
-                {
-                    "label": label,
-                    "raw_label": label,
-                    "in_stock": qty > 0,
-                    "stock_count": qty,
-                    "variant_id": None,
-                }
-            )
-    else:
-        for label in labels:
-            sizes.append(
-                {
-                    "label": label,
-                    "raw_label": label,
-                    "in_stock": True,
-                    "stock_count": 0,
-                    "variant_id": None,
-                }
-            )
+        sizes.append({
+            "label": label,
+            "raw_label": label,
+            "in_stock": True,  # All labels in the array are available
+            "stock_count": stock_count,
+            "variant_id": None,
+        })
 
     return sizes
 
 
-# ── HTML fallback ─────────────────────────────────────────────────
+# -- HTML fallback -----------------------------------------------------
 
 def _fallback_html(url: str) -> Optional[dict]:
     """Scrape LD+JSON + image URLs from the product page HTML.
@@ -239,10 +308,10 @@ def _fallback_html(url: str) -> Optional[dict]:
         return None
 
 
-# ── public entry point ────────────────────────────────────────────
+# -- public entry point ------------------------------------------------
 
 def fetch_end_page(product_url: str) -> dict:
-    """Fetch END product data.  Algolia first, HTML fallback.
+    """Fetch END product data. Algolia first, HTML fallback.
 
     Returns a dict with keys that ``end_clothing.py`` expects:
         ld, images, sizes, prices, breadcrumbs,
@@ -252,26 +321,8 @@ def fetch_end_page(product_url: str) -> dict:
     price_idx = REGION_PRICE_INDEX.get(region, 3)
     currency = REGION_CURRENCY.get(region, "EUR")
 
-    # 1. Extract SKU from URL
-    sku = _extract_sku_from_url(product_url)
-    logger.info("SKU from URL: %s", sku)
-
-    # 2. If no SKU in URL, try fetching HTML for LD+JSON
-    if not sku:
-        logger.info("No SKU in URL — trying HTML…")
-        try:
-            resp = cffi_requests.get(
-                product_url, impersonate="chrome", timeout=20
-            )
-            sku = _extract_sku_from_html(resp.text)
-            logger.info("SKU from HTML: %s", sku)
-        except Exception:
-            pass
-
-    # 3. Query Algolia
-    hit = None
-    if sku:
-        hit = _query_algolia(sku)
+    # 1. Find product in Algolia (tries SKU from URL, HTML, then name)
+    hit = _find_product_in_algolia(product_url)
 
     if hit:
         logger.info("Algolia OK: %s | %s", hit.get("name"), hit.get("sku"))
@@ -323,7 +374,7 @@ def fetch_end_page(product_url: str) -> dict:
             "source": "algolia",
         }
 
-    # 4. Fallback to HTML scrape (no sizes available)
+    # 2. Fallback to HTML scrape (no sizes available)
     logger.warning("Algolia miss — falling back to HTML scrape")
     fb = _fallback_html(product_url)
     if not fb:
@@ -379,7 +430,10 @@ if __name__ == "__main__":
                 "colour": data["colour"],
                 "images": len(data["images"]),
                 "sizes": len(data["sizes"]),
-                "in_stock": sum(1 for s in data["sizes"] if s["in_stock"]),
+                "sizes_detail": [
+                    {"label": s["label"], "in_stock": s["in_stock"], "qty": s["stock_count"]}
+                    for s in data["sizes"]
+                ],
                 "prices": data["prices"],
             },
             indent=2,
