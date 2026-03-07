@@ -214,8 +214,9 @@ def update_product(slug: str, updates: dict, request: Request):
 
     set_clause = ", ".join(f"{k} = ?" for k in fields_to_update)
     values = list(fields_to_update.values()) + [slug]
+    conn.execute("BEGIN")
     conn.execute(f"UPDATE products SET {set_clause}, updated_at = datetime('now') WHERE slug = ?", values)
-    conn.commit()
+    conn.execute("COMMIT")
     conn.close()
 
     return {"message": "Updated", "fields": list(fields_to_update.keys())}
@@ -232,10 +233,18 @@ def delete_product(slug: str, request: Request):
         raise HTTPException(status_code=404, detail="Product not found")
 
     pid = row["id"]
-    conn.execute("DELETE FROM product_images WHERE product_id = ?", (pid,))
-    conn.execute("DELETE FROM product_sizes WHERE product_id = ?", (pid,))
-    conn.execute("DELETE FROM products WHERE id = ?", (pid,))
-    conn.commit()
+    try:
+        # Use explicit transaction for atomic deletion
+        conn.execute("BEGIN")
+        conn.execute("DELETE FROM product_images WHERE product_id = ?", (pid,))
+        conn.execute("DELETE FROM product_sizes WHERE product_id = ?", (pid,))
+        conn.execute("DELETE FROM products WHERE id = ?", (pid,))
+        conn.execute("COMMIT")
+    except Exception as e:
+        conn.execute("ROLLBACK")
+        conn.close()
+        raise HTTPException(status_code=500, detail=f"Failed to delete: {e}")
+    
     conn.close()
     return {"message": "Deleted"}
 
@@ -257,16 +266,17 @@ def add_shopify_product(input: ShopifyFetchInput, request: Request):
         product_data["category"] = input.category_override
 
     try:
+        conn.execute("BEGIN")
         product_id = insert_product(conn, product_data)
         insert_images(conn, product_id, product_data["images"])
         insert_sizes(conn, product_id, product_data["sizes"])
-        conn.commit()
+        conn.execute("COMMIT")
     except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
-    finally:
+        conn.execute("ROLLBACK")
         conn.close()
-
+        raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
+    
+    conn.close()
     return {
         "id": product_id,
         "slug": product_data["slug"],
@@ -295,16 +305,17 @@ def add_end_product(input: EndFetchInput, request: Request):
         product_data["category"] = input.category_override
 
     try:
+        conn.execute("BEGIN")
         product_id = insert_product(conn, product_data)
         insert_images(conn, product_id, product_data["images"])
         insert_sizes(conn, product_id, product_data["sizes"])
-        conn.commit()
+        conn.execute("COMMIT")
     except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
-    finally:
+        conn.execute("ROLLBACK")
         conn.close()
-
+        raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
+    
+    conn.close()
     return {
         "id": product_id,
         "slug": product_data["slug"],
@@ -333,16 +344,17 @@ def add_sns_product(input: SnsFetchInput, request: Request):
         product_data["category"] = input.category_override
 
     try:
+        conn.execute("BEGIN")
         product_id = insert_product(conn, product_data)
         insert_images(conn, product_id, product_data["images"])
         insert_sizes(conn, product_id, product_data["sizes"])
-        conn.commit()
+        conn.execute("COMMIT")
     except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
-    finally:
+        conn.execute("ROLLBACK")
         conn.close()
-
+        raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
+    
+    conn.close()
     return {
         "id": product_id,
         "slug": product_data["slug"],
@@ -362,16 +374,17 @@ def add_manual_product(input: ManualProductInput, request: Request):
     conn = get_db()
     product_data["store_id"] = input.store_id
     try:
+        conn.execute("BEGIN")
         product_id = insert_product(conn, product_data)
         insert_images(conn, product_id, product_data["images"])
         insert_sizes(conn, product_id, product_data["sizes"])
-        conn.commit()
+        conn.execute("COMMIT")
     except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
-    finally:
+        conn.execute("ROLLBACK")
         conn.close()
-
+        raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
+    
+    conn.close()
     return {"id": product_id, "slug": product_data["slug"], "message": "Product added"}
 
 
