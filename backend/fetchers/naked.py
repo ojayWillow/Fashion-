@@ -109,34 +109,43 @@ def fetch_naked_product(product_url: str) -> dict:
         currency = meta_currency.get('content', 'DKK')
     logger.info(f"Currency: {currency}")
 
-    # Extract variant data for sizes and SKU
+    # Extract FULL variant data with availability field
+    # This is the complete structure with all fields including "available"
     variant_data = None
     for script in soup.find_all('script'):
-        if script.string and '"variants"' in script.string:
-            match = re.search(r'"variants"\s*:\s*(\[[^\]]+\])', script.string)
-            if match:
-                try:
-                    variant_data = json.loads(match.group(1))
-                    logger.info(f"Found {len(variant_data)} variants")
-                    break
-                except json.JSONDecodeError:
-                    continue
+        if not script.string or '"variants"' not in script.string:
+            continue
+        
+        # Look for the full variant array that includes "available" field
+        match = re.search(
+            r'"variants"\s*:\s*(\[\{"id":\d+,"title":"[^"]*".*?"available":(true|false).*?\}\])',
+            script.string,
+            re.DOTALL
+        )
+        if match:
+            try:
+                variant_data = json.loads(match.group(1))
+                logger.info(f"Found {len(variant_data)} variants with availability data")
+                break
+            except json.JSONDecodeError as e:
+                logger.debug(f"Failed to parse full variants: {e}")
+                continue
 
     if not variant_data or len(variant_data) == 0:
-        raise ValueError("Could not find variant data")
+        raise ValueError("Could not find variant data with availability")
 
     # Get price from first variant (in cents)
     first_variant = variant_data[0]
     sale_price_cents = first_variant.get('price', 0)
     
-    # Find compare_at_price anywhere in the HTML using simple regex
-    original_price_cents = sale_price_cents  # Default to sale price
-    compare_match = re.search(r'"compare_at_price"\s*:\s*(\d+)', html)
-    if compare_match:
-        original_price_cents = int(compare_match.group(1))
-        logger.info(f"Found compare_at_price: {original_price_cents}")
-    else:
-        logger.warning("No compare_at_price found, using sale price as original")
+    # Get compare_at_price from variant or search HTML
+    original_price_cents = first_variant.get('compare_at_price') or sale_price_cents
+    if not first_variant.get('compare_at_price'):
+        # Fallback: search in HTML
+        compare_match = re.search(r'"compare_at_price"\s*:\s*(\d+)', html)
+        if compare_match:
+            original_price_cents = int(compare_match.group(1))
+            logger.info(f"Found compare_at_price in HTML: {original_price_cents}")
 
     # Convert from cents to currency
     sale_price = sale_price_cents / 100.0
@@ -154,12 +163,11 @@ def fetch_naked_product(product_url: str) -> dict:
 
     discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
 
-    # Extract sizes from variants
-    # Note: Simple variant arrays don't include 'available' field, so default to True
+    # Extract sizes from variants with actual availability
     sizes = []
     for variant in variant_data:
-        size_label = variant.get('public_title') or variant.get('option1') or variant.get('title', '?')
-        available = variant.get('available', True)  # Default to True if not specified
+        size_label = variant.get('title') or variant.get('public_title') or variant.get('option1', '?')
+        available = variant.get('available', False)
         variant_id = str(variant.get('id', ''))
         
         sizes.append({
@@ -191,7 +199,7 @@ def fetch_naked_product(product_url: str) -> dict:
     gender = detect_gender_from_tags(tags=tags, name=name)
     logger.info(f"Gender: {gender}")
 
-    # Convert sizes to EU
+    # Convert sizes to EU (only for sneakers)
     for size in sizes:
         eu_label = convert_to_eu(size["original_label"], category, gender=gender)
         size["label"] = eu_label
@@ -251,10 +259,15 @@ def check_product_still_online(product_url: str) -> dict:
         if not has_product:
             return {"online": False, "in_stock": False, "sizes_available": 0, "sizes_total": 0}
 
+        # Try to get full variant data
         variant_data = None
         for script in soup.find_all('script'):
             if script.string and 'variants' in script.string:
-                match = re.search(r'"variants"\s*:\s*(\[.*?\])', script.string, re.DOTALL)
+                match = re.search(
+                    r'"variants"\s*:\s*(\[\{"id":\d+.*?"available":(true|false).*?\}\])',
+                    script.string,
+                    re.DOTALL
+                )
                 if match:
                     try:
                         variant_data = json.loads(match.group(1))
@@ -263,8 +276,7 @@ def check_product_still_online(product_url: str) -> dict:
                         continue
 
         if variant_data:
-            # For stock check, be more careful - default to True only if we can't determine
-            available = sum(1 for v in variant_data if v.get('available', True))
+            available = sum(1 for v in variant_data if v.get('available', False))
             total = len(variant_data)
             return {
                 "online": True,
