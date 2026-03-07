@@ -7,6 +7,7 @@ Usage:
     python refresh_sizes.py              # Refresh all products
     python refresh_sizes.py --store afew # AFEW only
     python refresh_sizes.py --store end  # END only
+    python refresh_sizes.py --store sns  # SNS only
 """
 import sys
 import time
@@ -98,13 +99,7 @@ def refresh_afew_sizes(conn) -> dict:
 
 
 def refresh_end_sizes(conn) -> dict:
-    """Re-fetch sizes from END Algolia and re-convert UK -> EU.
-
-    Uses the updated _end_worker which:
-    - Finds products via SKU or name fallback
-    - Returns footwear_size_label (only available sizes)
-    - Labels are UK-prefixed ('UK 8') so convert_to_eu handles them
-    """
+    """Re-fetch sizes from END Algolia and re-convert UK -> EU."""
     from fetchers._end_worker import _find_product_in_algolia, _parse_sizes
 
     products = conn.execute("""
@@ -138,7 +133,6 @@ def refresh_end_sizes(conn) -> dict:
                 skipped += 1
                 continue
 
-            # Detect gender from Algolia hit
             gender_field = (hit.get("gender") or "").lower().strip()
             if gender_field in ("women", "womens", "woman"):
                 gender = "women"
@@ -151,10 +145,8 @@ def refresh_end_sizes(conn) -> dict:
                 p["name"], breadcrumbs=hit.get("department_hierarchy", [])
             )
 
-            # Delete old sizes
             conn.execute("DELETE FROM product_sizes WHERE product_id = ?", (p["id"],))
 
-            # Convert and insert new sizes
             new_sizes = []
             for s in raw_sizes:
                 raw_label = s["raw_label"]
@@ -168,7 +160,106 @@ def refresh_end_sizes(conn) -> dict:
 
             insert_sizes(conn, p["id"], new_sizes)
 
-            # Update product in_stock status
+            any_in_stock = any(s["in_stock"] for s in new_sizes)
+            conn.execute(
+                "UPDATE products SET in_stock = ? WHERE id = ?",
+                (1 if any_in_stock else 0, p["id"]),
+            )
+
+            in_stock_count = sum(1 for s in new_sizes if s["in_stock"])
+            logger.info(
+                f"  {p['name']}: {len(new_sizes)} sizes, "
+                f"{in_stock_count} in stock (gender={gender}) \u2705"
+            )
+            updated += 1
+
+        except Exception as e:
+            logger.error(f"  {p['name']}: FAILED - {e}")
+            failed += 1
+
+        time.sleep(1)
+
+    conn.commit()
+    return {"total": total, "updated": updated, "failed": failed, "skipped": skipped}
+
+
+def refresh_sns_sizes(conn) -> dict:
+    """Re-fetch sizes from SNS Shopify .js and re-convert US -> EU."""
+    from fetchers._sns_worker import _extract_handle_from_url, _fetch_js_endpoint, _fetch_json_endpoint
+
+    products = conn.execute("""
+        SELECT p.id, p.name, p.product_url, p.slug, p.category
+        FROM products p
+        JOIN stores s ON p.store_id = s.id
+        WHERE s.base_url = 'https://www.sneakersnstuff.com'
+        AND p.status != 'removed'
+    """).fetchall()
+
+    total = len(products)
+    updated = 0
+    failed = 0
+    skipped = 0
+
+    logger.info(f"Refreshing sizes for {total} SNS products...")
+
+    for p in products:
+        try:
+            handle = _extract_handle_from_url(p["product_url"])
+
+            # Fetch .json for tags/gender and .js for real-time availability
+            try:
+                json_data = _fetch_json_endpoint(handle)
+            except Exception as e:
+                logger.warning(f"  {p['name']}: .json failed ({e}), skipping")
+                skipped += 1
+                continue
+
+            js_data = _fetch_js_endpoint(handle)
+
+            # Gender detection from tags
+            tags = json_data.get("tags", [])
+            if isinstance(tags, str):
+                tags = [t.strip() for t in tags.split(",")]
+            gender = detect_gender_from_tags(tags=tags, name=p["name"])
+
+            # Category
+            product_type = json_data.get("product_type", "")
+            category = p["category"] or detect_category(
+                p["name"], product_type=product_type, tags=tags
+            )
+
+            # Build availability map from .js (real-time)
+            js_avail = {}
+            if js_data:
+                for v in js_data.get("variants", []):
+                    js_avail[str(v["id"])] = v.get("available", False)
+
+            # Delete old sizes
+            conn.execute("DELETE FROM product_sizes WHERE product_id = ?", (p["id"],))
+
+            # Convert and insert new sizes
+            new_sizes = []
+            for v in json_data.get("variants", []):
+                vid = str(v["id"])
+                raw_label = v.get("option1", v.get("title", "?"))
+                eu_label = convert_to_eu(raw_label, category, gender=gender)
+
+                if js_avail:
+                    in_stock = js_avail.get(vid, False)
+                elif v.get("available") is not None:
+                    in_stock = bool(v["available"])
+                else:
+                    in_stock = False
+
+                new_sizes.append({
+                    "label": eu_label,
+                    "original_label": raw_label,
+                    "in_stock": in_stock,
+                    "variant_id": vid,
+                })
+
+            insert_sizes(conn, p["id"], new_sizes)
+
             any_in_stock = any(s["in_stock"] for s in new_sizes)
             conn.execute(
                 "UPDATE products SET in_stock = ? WHERE id = ?",
@@ -213,6 +304,10 @@ if __name__ == "__main__":
     if store_filter in (None, "end"):
         result = refresh_end_sizes(conn)
         print(f"\nEND: {result}")
+
+    if store_filter in (None, "sns"):
+        result = refresh_sns_sizes(conn)
+        print(f"\nSNS: {result}")
 
     conn.close()
     print("\nDone!")
