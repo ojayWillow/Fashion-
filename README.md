@@ -19,13 +19,17 @@ backend/           → Python FastAPI server
   schema.sql       → Database schema
   models.py        → Pydantic request/response models
   stock_checker.py → Scheduled stock verification (every 30 min)
+  refresh_images.py→ Re-scrape AFEW CDN images for existing products
+  refresh_sizes.py → Re-convert sizes with correct gender detection
   fetchers/
-    shopify.py     → Fetch from Shopify .json + .js APIs (AFEW etc.)
+    shopify.py     → Fetch from Shopify .json + .js APIs + AFEW CDN images
     end_clothing.py→ END Clothing product processor + category detection
     _end_worker.py → END data fetcher via Algolia search proxy
     manual.py      → Build product from manual input
   utils/
-    size_converter.py → UK/US → EU size conversion
+    size_converter.py  → Gender-aware UK/US → EU size conversion
+    category_detector.py → Auto-detect product category
+    http_retry.py  → HTTP requests with retry + backoff
 
 data/
   catalog.db       → SQLite database (created on first run, gitignored)
@@ -49,12 +53,15 @@ Open http://localhost:8000
 3. Paste the product URL and submit
 4. The system auto-fetches: name, brand, images, sizes, availability, pricing
 5. Category is **auto-detected** (sneakers, clothing, kids, etc.)
+6. Gender is **auto-detected** from store tags or product name for correct size conversion
 
 ### Data Sources
 
 **AFEW Store (Shopify)**
-- `/products/{handle}.json` — product data, images, pricing, tags
+- `/products/{handle}.json` — product data, pricing, tags
 - `/products/{handle}.js` — real-time variant availability
+- Product page HTML → `cdn.afew-store.com` packshot images (5-6 per product at 1200px)
+- Gender detection from `gender:Women`/`gender:Men` tags
 - Shipping: €7.99 to Latvia
 
 **END Clothing (Algolia)**
@@ -62,12 +69,30 @@ Open http://localhost:8000
 - Returns: name, brand, SKU, all sizes with per-size stock counts, prices per region (EU/GB/US), 6 product images, colorway, categories
 - No Playwright or browser cookies needed — pure HTTP
 - Fallback: LD+JSON scrape from product page HTML
+- Gender detection from Algolia `gender` field
 - Shipping: €11.99 to Latvia
+
+### Images
+
+**AFEW** uses a custom CDN (`cdn.afew-store.com`) separate from Shopify's CDN. The Shopify API only returns 1 thumbnail, so we scrape the product page HTML for the real images:
+- Sneakers: 6 rotation angles (0°–150°) at 1200px
+- Clothing: 5 rotation angles (0°–120°) at 1200px
+- Falls back to Shopify API images if scrape fails
+
+**END** images come from Algolia (8-12 per product, already high quality).
+
+### Size Conversion
+
+All sizes are converted to EU format. The converter is **gender-aware**:
+- Detects gender from store tags (`gender:Women`, `gender:Men`) and product name keywords (`WMNS`, `GS`, `TD`)
+- Women's US 5 = EU 35.5 (men's US 5 = EU 37.5)
+- Supports: US Men's, US Women's, UK, Kids, Toddler → EU
+- Clothing sizes (S/M/L/XL) pass through unchanged
 
 ### Stock Checker
 - Runs automatically every 30 minutes via APScheduler
-- Shopify products: checked via `.json` endpoint
-- END products: skipped (flagged for manual review)
+- Shopify products: checked via `.js` endpoint
+- END products: skipped (flagged for manual review — needs Algolia re-check)
 - 404 responses: product marked as offline/removed
 - Manual trigger: `POST /api/stock-check/trigger`
 - Status: `GET /api/stock-check/status`
@@ -84,7 +109,16 @@ Detects from product metadata, tags, and name keywords:
 - Filter by: **category**, **brand**, **size**, **store**
 - Sort by: newest, price, discount, total cost (incl. shipping)
 - Size filter updates dynamically based on selected category
-- UK sizes from END are auto-converted to EU
+- UK/US sizes from stores are auto-converted to EU
+
+### Maintenance Scripts
+
+```bash
+cd backend
+python refresh_images.py          # Re-scrape AFEW CDN images for all products
+python refresh_sizes.py            # Re-convert sizes with correct gender detection
+python refresh_images.py --store all  # Refresh all stores (AFEW + END)
+```
 
 ## API Endpoints
 
