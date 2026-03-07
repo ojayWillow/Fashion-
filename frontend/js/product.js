@@ -181,7 +181,13 @@ function initEditCategory() {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ category: newCategory }),
+                credentials: 'same-origin',  // Include session cookie for auth
             });
+            if (res.status === 401) {
+                alert('Session expired. Please log in at /admin first.');
+                window.location.href = '/admin';
+                return;
+            }
             if (res.ok) {
                 const catLabels = { sneakers: '\ud83d\udc5f Sneakers', clothing: '\ud83d\udc55 Clothing', accessories: '\ud83c\udfa9 Accessories', kids: '\ud83e\udde1 Kids', toddler: '\ud83d\udc76 Toddler' };
                 display.textContent = catLabels[newCategory] || newCategory;
@@ -189,7 +195,8 @@ function initEditCategory() {
                 editBtn.classList.remove('hidden');
                 currentCategory = newCategory;
             } else {
-                alert('Failed to update category');
+                const error = await res.json();
+                alert('Failed to update category: ' + (error.detail || 'Unknown error'));
             }
         } catch (e) {
             alert('Error: ' + e.message);
@@ -205,11 +212,20 @@ function initDelete(slug, name) {
         if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
 
         try {
-            const res = await fetch(`${API_BASE}/api/products/${slug}`, { method: 'DELETE' });
+            const res = await fetch(`${API_BASE}/api/products/${slug}`, {
+                method: 'DELETE',
+                credentials: 'same-origin',  // Include session cookie for auth
+            });
+            if (res.status === 401) {
+                alert('Session expired. Please log in at /admin first.');
+                window.location.href = '/admin';
+                return;
+            }
             if (res.ok) {
                 window.location.href = '/';
             } else {
-                alert('Failed to delete product');
+                const error = await res.json();
+                alert('Failed to delete product: ' + (error.detail || 'Unknown error'));
             }
         } catch (e) {
             alert('Error: ' + e.message);
