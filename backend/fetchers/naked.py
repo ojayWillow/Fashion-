@@ -155,10 +155,11 @@ def fetch_naked_product(product_url: str) -> dict:
     discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
 
     # Extract sizes from variants
+    # Note: Simple variant arrays don't include 'available' field, so default to True
     sizes = []
     for variant in variant_data:
         size_label = variant.get('public_title') or variant.get('option1') or variant.get('title', '?')
-        available = variant.get('available', False)
+        available = variant.get('available', True)  # Default to True if not specified
         variant_id = str(variant.get('id', ''))
         
         sizes.append({
@@ -262,7 +263,8 @@ def check_product_still_online(product_url: str) -> dict:
                         continue
 
         if variant_data:
-            available = sum(1 for v in variant_data if v.get('available', False))
+            # For stock check, be more careful - default to True only if we can't determine
+            available = sum(1 for v in variant_data if v.get('available', True))
             total = len(variant_data)
             return {
                 "online": True,
