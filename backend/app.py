@@ -1,12 +1,17 @@
 """FastAPI application — serves the catalog API + frontend."""
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Optional
+
+# Load .env file before any other imports that read env vars
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pathlib import Path
-from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from database import get_db, init_db, insert_product, insert_images, insert_sizes, get_all_products, get_product_by_slug, get_store_by_platform
