@@ -1,8 +1,9 @@
 """SQLite database connection and helpers."""
+import os
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent.parent / "data" / "catalog.db"
+DB_PATH = Path(os.environ.get("DB_PATH", Path(__file__).parent.parent / "data" / "catalog.db"))
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 
