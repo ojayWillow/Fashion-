@@ -1,4 +1,4 @@
-"""Convert US/UK shoe sizes to EU. Clothing sizes (S/M/L/XL) pass through unchanged."""
+"""Convert US/UK shoe sizes to EU. Clothing sizes (S/M/L/XL and numeric) pass through unchanged."""
 import re
 
 # US Men's -> EU (covers most sneaker brands)
@@ -117,9 +117,16 @@ def convert_to_eu(raw_label: str, category: str = "sneakers", gender: str = "men
     - "9.5" (bare number, ambiguous) -> detect by range + gender
     - "EU 42 / US 9.5" (combo) -> "42"
     - "S", "M", "L" (clothing) -> pass through unchanged
+    
+    For non-sneaker categories (clothing, accessories, etc.), all sizes pass through unchanged.
     """
     label = raw_label.strip()
     label_lower = label.lower()
+
+    # For non-sneaker categories, pass everything through unchanged
+    # This handles jeans (25-36), shirts (32-44), etc.
+    if category != "sneakers":
+        return label
 
     # Clothing sizes pass through
     if label_lower in _CLOTHING_SIZES:
