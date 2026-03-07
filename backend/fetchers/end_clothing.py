@@ -30,6 +30,28 @@ def _slugify(text: str) -> str:
     return text.strip("-")
 
 
+def _detect_end_gender(product: dict) -> str:
+    """Detect gender from END's Algolia data."""
+    gender_field = (product.get("gender") or "").lower().strip()
+    if gender_field in ("women", "woman", "female"):
+        return "women"
+    if gender_field in ("men", "man", "male"):
+        return "men"
+    if gender_field in ("kids", "youth", "junior"):
+        return "kids"
+
+    # Fallback: check product name
+    name = product.get("name", "").lower()
+    if any(w in name for w in ['wmns', 'womens', "women's", 'woman']):
+        return "women"
+    if any(w in name for w in ['gs', 'grade school', 'junior', 'youth', 'kids']):
+        return "kids"
+    if any(w in name for w in ['td', 'toddler', 'infant']):
+        return "toddler"
+
+    return "unisex"
+
+
 def fetch_end_product(product_url: str) -> dict:
     """Fetch product data from an END Clothing product page.
 
@@ -94,7 +116,7 @@ def fetch_end_product(product_url: str) -> dict:
 
     discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
 
-    # Images — prefer Algolia media_gallery URLs
+    # Images
     image_urls = product.get('images', [])
     if not image_urls:
         ld_image = ld.get('image')
@@ -106,18 +128,22 @@ def fetch_end_product(product_url: str) -> dict:
     images = [{"url": url, "alt": f"{name} - image {i+1}"}
               for i, url in enumerate(image_urls)]
 
-    # Sizes
-    raw_sizes = product.get('sizes', [])
-    raw_sizes = [s for s in raw_sizes if s.get('label', '').lower().strip() not in _SIZE_IGNORE]
+    # Gender + Category detection
+    gender = _detect_end_gender(product)
+    logger.info(f"Gender: {gender}")
 
     category = detect_category(name, breadcrumbs=product.get('breadcrumbs', []))
     logger.info(f"Category: {category}")
+
+    # Sizes (with correct gender-aware conversion)
+    raw_sizes = product.get('sizes', [])
+    raw_sizes = [s for s in raw_sizes if s.get('label', '').lower().strip() not in _SIZE_IGNORE]
 
     sizes = []
     for s in raw_sizes:
         raw_label = s.get('raw_label', s.get('label', ''))
         label = s.get('label', raw_label)
-        eu_label = convert_to_eu(label, category)
+        eu_label = convert_to_eu(label, category, gender=gender)
 
         sizes.append({
             "label": eu_label,
@@ -128,7 +154,7 @@ def fetch_end_product(product_url: str) -> dict:
 
     in_stock_count = sum(1 for s in sizes if s['in_stock'])
     any_in_stock = in_stock_count > 0 if sizes else True
-    logger.info(f"Sizes: {in_stock_count}/{len(sizes)} in stock")
+    logger.info(f"Sizes: {in_stock_count}/{len(sizes)} in stock (gender={gender})")
 
     path_slug = parsed.path.rstrip('/').split('/')[-1]
     slug = re.sub(r'\.html$', '', path_slug)
@@ -142,6 +168,7 @@ def fetch_end_product(product_url: str) -> dict:
         "sku": sku,
         "colorway": colorway,
         "category": category,
+        "gender": gender,
         "original_price": original_price,
         "sale_price": sale_price,
         "discount_pct": discount_pct,

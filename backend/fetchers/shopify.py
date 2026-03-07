@@ -15,7 +15,7 @@ import time
 import logging
 import requests
 from urllib.parse import urlparse, unquote
-from utils.size_converter import convert_to_eu
+from utils.size_converter import convert_to_eu, detect_gender_from_tags
 from utils.category_detector import detect_category
 from utils.http_retry import request_with_retry
 
@@ -64,13 +64,11 @@ def _scrape_afew_cdn_images(product_url: str) -> list[str]:
         if not preferred:
             preferred = [u for u in all_urls if "/2400/" in u]
         if not preferred:
-            # Deduplicate by angle — take highest res per unique angle
             by_angle = {}
             for u in all_urls:
-                # Extract angle from URL like packshots-90.jpg
                 m = re.search(r'packshots-(\d+)\.', u)
                 angle = m.group(1) if m else "unknown"
-                by_angle[angle] = u  # Last one wins (usually highest res)
+                by_angle[angle] = u
             preferred = list(by_angle.values())
 
         # Sort by angle number for consistent gallery ordering
@@ -121,13 +119,19 @@ def fetch_shopify_product(product_url: str) -> dict:
     if not json_variants:
         raise ValueError(f"Product has no variants: {product_url}")
 
-    # Auto-detect category
+    # Parse tags
     raw_tags = json_data.get("tags", [])
     if isinstance(raw_tags, str):
         raw_tags = [t.strip() for t in raw_tags.split(",")]
+
+    # Auto-detect category
     product_type = json_data.get("product_type", "")
     category = detect_category(json_data["title"], product_type=product_type, tags=raw_tags)
     logger.info(f"Category: {category} (type='{product_type}')")
+
+    # Detect gender for correct size conversion
+    gender = detect_gender_from_tags(tags=raw_tags, name=json_data["title"])
+    logger.info(f"Gender: {gender}")
 
     # Pricing
     original_price = None
@@ -147,13 +151,10 @@ def fetch_shopify_product(product_url: str) -> dict:
     discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
 
     # ── Images ────────────────────────────────────────────────────
-    # For AFEW: scrape high-res packshots from their custom CDN
-    # For other Shopify stores: use API images as before
-
     all_image_urls = []
 
     if is_afew:
-        time.sleep(0.3)  # Be nice
+        time.sleep(0.3)
         cdn_images = _scrape_afew_cdn_images(product_url)
         if cdn_images:
             all_image_urls = cdn_images
@@ -200,7 +201,7 @@ def fetch_shopify_product(product_url: str) -> dict:
 
     logger.info(f"Images: {len(all_image_urls)} total")
 
-    # Sizes & availability (convert to EU)
+    # Sizes & availability (convert to EU using correct gender table)
     js_avail = {}
     if js_data:
         for v in js_data.get("variants", []):
@@ -217,7 +218,7 @@ def fetch_shopify_product(product_url: str) -> dict:
             in_stock = False
 
         raw_label = v.get("option1", v.get("title", "?"))
-        eu_label = convert_to_eu(raw_label, category)
+        eu_label = convert_to_eu(raw_label, category, gender=gender)
 
         sizes.append({
             "label": eu_label,
@@ -228,7 +229,7 @@ def fetch_shopify_product(product_url: str) -> dict:
 
     in_stock_count = sum(1 for s in sizes if s["in_stock"])
     any_in_stock = in_stock_count > 0
-    logger.info(f"Sizes: {in_stock_count}/{len(sizes)} in stock (converted to EU)")
+    logger.info(f"Sizes: {in_stock_count}/{len(sizes)} in stock (converted to EU, gender={gender})")
 
     return {
         "name": json_data["title"],
@@ -237,6 +238,7 @@ def fetch_shopify_product(product_url: str) -> dict:
         "sku": json_variants[0].get("sku"),
         "colorway": colorway,
         "category": category,
+        "gender": gender,
         "original_price": original_price,
         "sale_price": sale_price,
         "discount_pct": discount_pct,
