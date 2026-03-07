@@ -43,6 +43,7 @@
         <div class="tab-row">
             <button class="tab-btn active" data-tab="shopify">Shopify (AFEW)</button>
             <button class="tab-btn" data-tab="end">END Clothing</button>
+            <button class="tab-btn" data-tab="sns">SNS</button>
             <button class="tab-btn" data-tab="manual">Manual Entry</button>
         </div>
 
@@ -70,6 +71,20 @@
                     <div class="form-hint">Paste any END Clothing product page URL (EU, GB, or US)</div>
                 </div>
                 <p class="auto-detect-note">🤖 Brand, sizes with stock levels, images, prices, and category are all fetched automatically. No browser or cookies needed.</p>
+            </div>
+            <button type="submit" class="submit-btn">Fetch & Add Product</button>
+        </form>
+
+        <!-- SNS Tab -->
+        <form id="sns-form" class="hidden">
+            <div class="form-section">
+                <h2>Paste SNS (Sneakersnstuff) URL</h2>
+                <div class="form-group">
+                    <label>Product URL</label>
+                    <input type="url" class="form-input" id="sns-url" placeholder="https://www.sneakersnstuff.com/en-eu/products/..." required>
+                    <div class="form-hint">Paste any Sneakersnstuff product page URL (uses /en-eu/ locale)</div>
+                </div>
+                <p class="auto-detect-note">🤖 SNS runs on Shopify. Brand, sizes (converted from US → EU), images, prices, and EAN/GTIN are fetched automatically.</p>
             </div>
             <button type="submit" class="submit-btn">Fetch & Add Product</button>
         </form>
@@ -147,6 +162,7 @@
                     <select class="form-input" id="manual-store">
                         <option value="2">END Clothing (€11.99 shipping)</option>
                         <option value="1">AFEW Store (€7.99 shipping)</option>
+                        <option value="3">SNS - Sneakersnstuff (shipping TBD)</option>
                     </select>
                 </div>
             </div>
@@ -168,6 +184,7 @@
                 const tab = btn.dataset.tab;
                 document.getElementById('shopify-form').classList.toggle('hidden', tab !== 'shopify');
                 document.getElementById('end-form').classList.toggle('hidden', tab !== 'end');
+                document.getElementById('sns-form').classList.toggle('hidden', tab !== 'sns');
                 document.getElementById('manual-form').classList.toggle('hidden', tab !== 'manual');
                 resultDiv.classList.add('hidden');
             });
@@ -189,6 +206,15 @@
                 product_url: document.getElementById('end-url').value,
             };
             await submitProduct('/api/products/end', body);
+        });
+
+        // SNS form
+        document.getElementById('sns-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const body = {
+                product_url: document.getElementById('sns-url').value,
+            };
+            await submitProduct('/api/products/sns', body);
         });
 
         // Manual form
