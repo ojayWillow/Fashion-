@@ -27,17 +27,44 @@
         .result-error { background: var(--sale-glow); border: 1px solid var(--sale); color: var(--sale); }
         .hidden { display: none; }
         .auto-detect-note { font-size: 0.8rem; color: var(--text-muted); margin-top: 8px; font-style: italic; }
+
+        /* Login gate */
+        .login-gate { max-width: 400px; margin: 80px auto; text-align: center; }
+        .login-gate h1 { font-size: 1.5rem; margin-bottom: 8px; }
+        .login-gate p { color: var(--text-secondary); margin-bottom: 24px; font-size: 0.9rem; }
+        .login-gate .form-input { text-align: center; font-size: 1.1rem; letter-spacing: 0.1em; }
+        .login-gate .submit-btn { margin-top: 12px; }
+        .login-error { color: var(--sale); font-size: 0.85rem; margin-top: 8px; display: none; }
+        .logout-btn { background: none; border: 1px solid var(--border); color: var(--text-secondary); padding: 6px 14px; border-radius: var(--radius-sm); cursor: pointer; font-family: var(--font-main); font-size: 0.8rem; transition: all 0.2s; }
+        .logout-btn:hover { border-color: var(--sale); color: var(--sale); }
     </style>
 </head>
 <body>
     <header class="header">
         <div class="header-inner">
             <a href="/" class="logo">FASHION<span class="logo-accent">-</span></a>
-            <span style="color: var(--warning); font-weight: 600;">ADMIN</span>
+            <div style="display:flex;align-items:center;gap:12px;">
+                <span style="color: var(--warning); font-weight: 600;">ADMIN</span>
+                <button class="logout-btn hidden" id="logout-btn" onclick="doLogout()">Logout</button>
+            </div>
         </div>
     </header>
 
-    <main class="container admin-container">
+    <!-- Login Gate -->
+    <div id="login-gate" class="container login-gate">
+        <div class="form-section">
+            <h1>🔒 Admin Access</h1>
+            <p>Enter the admin password to continue</p>
+            <form id="login-form">
+                <input type="password" class="form-input" id="login-password" placeholder="Password" autocomplete="current-password" required>
+                <button type="submit" class="submit-btn">Login</button>
+            </form>
+            <div class="login-error" id="login-error">❌ Incorrect password</div>
+        </div>
+    </div>
+
+    <!-- Admin Content (hidden until authenticated) -->
+    <main class="container admin-container hidden" id="admin-content">
         <h1 style="font-size: 1.5rem; margin-bottom: 24px;">Add Product</h1>
 
         <div class="tab-row">
@@ -175,6 +202,65 @@
     <script>
         const API_BASE = '';
         const resultDiv = document.getElementById('result');
+        const loginGate = document.getElementById('login-gate');
+        const adminContent = document.getElementById('admin-content');
+        const logoutBtn = document.getElementById('logout-btn');
+        const loginError = document.getElementById('login-error');
+
+        // Check auth on page load
+        async function checkAuth() {
+            try {
+                const res = await fetch(`${API_BASE}/api/auth/check`, { credentials: 'same-origin' });
+                const data = await res.json();
+                if (data.authenticated) {
+                    showAdmin();
+                }
+            } catch (e) {
+                console.warn('Auth check failed', e);
+            }
+        }
+
+        function showAdmin() {
+            loginGate.classList.add('hidden');
+            adminContent.classList.remove('hidden');
+            logoutBtn.classList.remove('hidden');
+        }
+
+        // Login form
+        document.getElementById('login-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            loginError.style.display = 'none';
+            const password = document.getElementById('login-password').value;
+
+            try {
+                const res = await fetch(`${API_BASE}/api/auth/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password }),
+                    credentials: 'same-origin',
+                });
+
+                if (res.ok) {
+                    showAdmin();
+                } else {
+                    loginError.style.display = 'block';
+                    document.getElementById('login-password').value = '';
+                    document.getElementById('login-password').focus();
+                }
+            } catch (e) {
+                loginError.textContent = '\u274c Network error';
+                loginError.style.display = 'block';
+            }
+        });
+
+        // Logout
+        async function doLogout() {
+            await fetch(`${API_BASE}/api/auth/logout`, { method: 'POST', credentials: 'same-origin' });
+            adminContent.classList.add('hidden');
+            logoutBtn.classList.add('hidden');
+            loginGate.classList.remove('hidden');
+            document.getElementById('login-password').value = '';
+        }
 
         // Tab switching
         document.querySelectorAll('.tab-btn').forEach(btn => {
@@ -193,28 +279,25 @@
         // Shopify form
         document.getElementById('shopify-form').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const body = {
+            await submitProduct('/api/products/shopify', {
                 product_url: document.getElementById('shopify-url').value,
-            };
-            await submitProduct('/api/products/shopify', body);
+            });
         });
 
         // END Clothing form
         document.getElementById('end-form').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const body = {
+            await submitProduct('/api/products/end', {
                 product_url: document.getElementById('end-url').value,
-            };
-            await submitProduct('/api/products/end', body);
+            });
         });
 
         // SNS form
         document.getElementById('sns-form').addEventListener('submit', async (e) => {
             e.preventDefault();
-            const body = {
+            await submitProduct('/api/products/sns', {
                 product_url: document.getElementById('sns-url').value,
-            };
-            await submitProduct('/api/products/sns', body);
+            });
         });
 
         // Manual form
@@ -225,7 +308,7 @@
             const sizes = document.getElementById('manual-sizes').value
                 .split(',').map(s => s.trim()).filter(Boolean);
 
-            const body = {
+            await submitProduct('/api/products/manual', {
                 name: document.getElementById('manual-name').value,
                 brand: document.getElementById('manual-brand').value,
                 category: document.getElementById('manual-category').value,
@@ -238,8 +321,7 @@
                 sizes: sizes,
                 description: document.getElementById('manual-description').value || '',
                 store_id: parseInt(document.getElementById('manual-store').value),
-            };
-            await submitProduct('/api/products/manual', body);
+            });
         });
 
         async function submitProduct(endpoint, body) {
@@ -249,8 +331,20 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body),
+                    credentials: 'same-origin',
                 });
                 const data = await res.json();
+
+                if (res.status === 401) {
+                    // Session expired — show login gate
+                    adminContent.classList.add('hidden');
+                    logoutBtn.classList.add('hidden');
+                    loginGate.classList.remove('hidden');
+                    loginError.textContent = '\u274c Session expired. Please log in again.';
+                    loginError.style.display = 'block';
+                    return;
+                }
+
                 if (res.ok) {
                     const catEmoji = { sneakers: '\ud83d\udc5f', clothing: '\ud83d\udc55', accessories: '\ud83c\udfa9', kids: '\ud83e\udde1', toddler: '\ud83d\udc76' };
                     const cat = data.category || 'unknown';
@@ -267,6 +361,9 @@
             }
             resultDiv.classList.remove('hidden');
         }
+
+        // Check auth on load
+        checkAuth();
     </script>
 </body>
 </html>

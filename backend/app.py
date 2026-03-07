@@ -1,7 +1,7 @@
 """FastAPI application — serves the catalog API + frontend."""
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -16,6 +16,7 @@ from fetchers.end_clothing import fetch_end_product
 from fetchers.sns import fetch_sns_product
 from fetchers.manual import build_manual_product
 from stock_checker import run_stock_check, get_status as get_stock_status
+from auth import check_password, create_session_token, is_authenticated, require_auth, COOKIE_NAME, SESSION_MAX_AGE
 
 logger = logging.getLogger("fashion")
 
@@ -25,7 +26,6 @@ scheduler = BackgroundScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     init_db()
     scheduler.add_job(
         run_stock_check,
@@ -39,28 +39,61 @@ async def lifespan(app: FastAPI):
     logger.info("[FASHION-] Server ready! Stock checker scheduled every 30 min.")
     print("[FASHION-] Server ready! Stock checker scheduled every 30 min. Open http://127.0.0.1:8000")
     yield
-    # Shutdown
     scheduler.shutdown(wait=False)
     logger.info("[FASHION-] Scheduler stopped.")
 
 
-app = FastAPI(title="Fashion Catalog API", version="0.5.0", lifespan=lifespan)
+app = FastAPI(title="Fashion Catalog API", version="0.6.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend")
+
+
+# ─── Auth Endpoints ───────────────────────────
+
+@app.post("/api/auth/login")
+def login(request: Request, response: Response, body: dict):
+    """Authenticate with admin password and receive a session cookie."""
+    password = body.get("password", "")
+    if not check_password(password):
+        raise HTTPException(status_code=401, detail="Incorrect password")
+
+    token = create_session_token()
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=SESSION_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=False,  # Set to True in production with HTTPS
+    )
+    return {"message": "Logged in"}
+
+
+@app.get("/api/auth/check")
+def check_auth(request: Request):
+    """Check if the current session is authenticated."""
+    return {"authenticated": is_authenticated(request)}
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response):
+    """Clear the session cookie."""
+    response.delete_cookie(key=COOKIE_NAME)
+    return {"message": "Logged out"}
 
 
 # ─── Stock Check Endpoints ─────────────────────
 
 @app.get("/api/stock-check/status")
 def stock_check_status():
-    """Return info about the scheduled stock checker."""
     status = get_stock_status()
     status["scheduler_running"] = scheduler.running
     next_run = scheduler.get_job("stock_checker")
@@ -69,8 +102,8 @@ def stock_check_status():
 
 
 @app.post("/api/stock-check/trigger")
-def trigger_stock_check():
-    """Manually trigger a stock check now."""
+def trigger_stock_check(request: Request):
+    require_auth(request)
     try:
         result = run_stock_check()
         return {"message": "Stock check completed", "result": result}
@@ -158,8 +191,9 @@ def get_product(slug: str):
 
 
 @app.patch("/api/products/{slug}")
-def update_product(slug: str, updates: dict):
-    """Update product fields. Supports: category, name, featured, brand, colorway."""
+def update_product(slug: str, updates: dict, request: Request):
+    """Update product fields. Requires auth."""
+    require_auth(request)
     conn = get_db()
     product = get_product_by_slug(conn, slug)
     if not product:
@@ -183,8 +217,9 @@ def update_product(slug: str, updates: dict):
 
 
 @app.delete("/api/products/{slug}")
-def delete_product(slug: str):
-    """Delete a product and its images/sizes."""
+def delete_product(slug: str, request: Request):
+    """Delete a product. Requires auth."""
+    require_auth(request)
     conn = get_db()
     row = conn.execute("SELECT id FROM products WHERE slug = ?", (slug,)).fetchone()
     if not row:
@@ -201,7 +236,8 @@ def delete_product(slug: str):
 
 
 @app.post("/api/products/shopify")
-def add_shopify_product(input: ShopifyFetchInput):
+def add_shopify_product(input: ShopifyFetchInput, request: Request):
+    require_auth(request)
     try:
         product_data = fetch_shopify_product(input.product_url)
     except Exception as e:
@@ -235,8 +271,9 @@ def add_shopify_product(input: ShopifyFetchInput):
 
 
 @app.post("/api/products/end")
-def add_end_product(input: EndFetchInput):
-    """Fetch and add a product from END Clothing."""
+def add_end_product(input: EndFetchInput, request: Request):
+    """Fetch and add a product from END Clothing. Requires auth."""
+    require_auth(request)
     try:
         product_data = fetch_end_product(input.product_url)
     except RuntimeError as e:
@@ -246,7 +283,7 @@ def add_end_product(input: EndFetchInput):
 
     conn = get_db()
     store = get_store_by_platform(conn, product_data["_base_url"])
-    store_id = store["id"] if store else 2  # default to END Clothing store id
+    store_id = store["id"] if store else 2
     product_data["store_id"] = store_id
 
     if input.category_override:
@@ -272,8 +309,9 @@ def add_end_product(input: EndFetchInput):
 
 
 @app.post("/api/products/sns")
-def add_sns_product(input: SnsFetchInput):
-    """Fetch and add a product from SNS (Sneakersnstuff)."""
+def add_sns_product(input: SnsFetchInput, request: Request):
+    """Fetch and add a product from SNS. Requires auth."""
+    require_auth(request)
     try:
         product_data = fetch_sns_product(input.product_url)
     except RuntimeError as e:
@@ -283,7 +321,7 @@ def add_sns_product(input: SnsFetchInput):
 
     conn = get_db()
     store = get_store_by_platform(conn, product_data["_base_url"])
-    store_id = store["id"] if store else 3  # default to SNS store id
+    store_id = store["id"] if store else 3
     product_data["store_id"] = store_id
 
     if input.category_override:
@@ -309,7 +347,8 @@ def add_sns_product(input: SnsFetchInput):
 
 
 @app.post("/api/products/manual")
-def add_manual_product(input: ManualProductInput):
+def add_manual_product(input: ManualProductInput, request: Request):
+    require_auth(request)
     try:
         product_data = build_manual_product(input.model_dump())
     except ValueError as e:
