@@ -64,14 +64,11 @@ def _is_us_size(num_str: str) -> bool:
 def detect_gender_from_tags(tags: list[str] | None = None, name: str = "") -> str:
     """Detect product gender from store tags or product name.
 
-    Returns: 'women', 'men', 'kids', 'toddler', or 'unisex'
+    Returns: 'women', 'men', 'kids', 'toddler', or 'men' (default)
+
+    Most sneakers sold on AFEW/END/SNS are men's sizing. We default
+    to 'men' instead of 'unisex' to use the correct US->EU table.
     """
-    text_parts = [name.lower()]
-    for tag in (tags or []):
-        text_parts.append(tag.lower())
-
-    text = " ".join(text_parts)
-
     # Check tags first (most reliable)
     for tag in (tags or []):
         tl = tag.lower().strip()
@@ -84,30 +81,34 @@ def detect_gender_from_tags(tags: list[str] | None = None, name: str = "") -> st
         if tl in ("gender:toddler", "gender:infant", "gender:baby"):
             return "toddler"
         if tl in ("gender:unisex",):
-            return "unisex"
+            return "men"  # Use men's table for unisex (standard in sneaker industry)
 
-    # Fallback: check product name for common keywords
-    wmns_words = ['wmns', 'womens', "women's", 'woman', 'w ', ' w']
-    kids_words = ['gs', 'grade school', 'junior', 'youth', 'kids', 'big kid', 'little kid']
-    toddler_words = ['td', 'toddler', 'infant', 'baby', 'crib']
+    # Combine name + tags for keyword search
+    name_lower = name.lower()
 
-    if any(w in text for w in toddler_words):
+    # Fallback: check product name for common keywords using word boundaries
+    # to avoid false positives like 'low' matching 'w'
+    toddler_patterns = [r'\btd\b', r'\btoddler\b', r'\binfant\b', r'\bbaby\b', r'\bcrib\b']
+    kids_patterns = [r'\bgs\b', r'\bgrade school\b', r'\bjunior\b', r'\byouth\b', r'\bkids\b', r'\bbig kid\b', r'\blittle kid\b']
+    womens_patterns = [r'\bwmns\b', r'\bwomens\b', r"\bwomen's\b", r'\bwoman\b']
+
+    if any(re.search(p, name_lower) for p in toddler_patterns):
         return "toddler"
-    if any(w in text for w in kids_words):
+    if any(re.search(p, name_lower) for p in kids_patterns):
         return "kids"
-    if any(w in text for w in wmns_words):
+    if any(re.search(p, name_lower) for p in womens_patterns):
         return "women"
 
-    return "unisex"
+    return "men"
 
 
-def convert_to_eu(raw_label: str, category: str = "sneakers", gender: str = "unisex") -> str:
+def convert_to_eu(raw_label: str, category: str = "sneakers", gender: str = "men") -> str:
     """Convert a size label to EU format. Returns the EU size string.
 
     Args:
         raw_label: The raw size string from the store (e.g. "9.5", "US 8", "42")
         category: Product category ('sneakers', 'clothing', 'accessories', etc.)
-        gender: Product gender ('men', 'women', 'kids', 'toddler', 'unisex')
+        gender: Product gender ('men', 'women', 'kids', 'toddler')
 
     Handles formats like:
     - "42" or "42.5" (already EU) -> "42" / "42.5"
