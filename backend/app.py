@@ -236,6 +236,8 @@ def delete_product(slug: str, request: Request):
     try:
         # Use explicit transaction for atomic deletion
         conn.execute("BEGIN")
+        # Delete in order: stock_checks, images, sizes, then product
+        conn.execute("DELETE FROM stock_checks WHERE product_id = ?", (pid,))
         conn.execute("DELETE FROM product_images WHERE product_id = ?", (pid,))
         conn.execute("DELETE FROM product_sizes WHERE product_id = ?", (pid,))
         conn.execute("DELETE FROM products WHERE id = ?", (pid,))
