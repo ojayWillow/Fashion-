@@ -15,8 +15,8 @@
         .form-input:focus { border-color: var(--accent); outline: none; }
         textarea.form-input { min-height: 100px; resize: vertical; }
         .form-hint { font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; }
-        .tab-row { display: flex; gap: 0; margin-bottom: 24px; }
-        .tab-btn { flex: 1; padding: 12px; background: var(--bg-card); border: 1px solid var(--border); color: var(--text-secondary); font-family: var(--font-main); font-size: 0.95rem; cursor: pointer; transition: all 0.2s; }
+        .tab-row { display: flex; gap: 0; margin-bottom: 24px; flex-wrap: wrap; }
+        .tab-btn { flex: 1; min-width: 120px; padding: 12px 8px; background: var(--bg-card); border: 1px solid var(--border); color: var(--text-secondary); font-family: var(--font-main); font-size: 0.9rem; cursor: pointer; transition: all 0.2s; }
         .tab-btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); }
         .tab-btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
         .tab-btn.active { background: var(--accent); color: var(--bg-primary); font-weight: 700; border-color: var(--accent); }
@@ -71,6 +71,7 @@
             <button class="tab-btn active" data-tab="shopify">Shopify (AFEW)</button>
             <button class="tab-btn" data-tab="end">END Clothing</button>
             <button class="tab-btn" data-tab="sns">SNS</button>
+            <button class="tab-btn" data-tab="naked">Naked CPH</button>
             <button class="tab-btn" data-tab="manual">Manual Entry</button>
         </div>
 
@@ -112,6 +113,20 @@
                     <div class="form-hint">Paste any Sneakersnstuff product page URL (uses /en-eu/ locale)</div>
                 </div>
                 <p class="auto-detect-note">🤖 SNS runs on Shopify. Brand, sizes (converted from US → EU), images, prices, and EAN/GTIN are fetched automatically.</p>
+            </div>
+            <button type="submit" class="submit-btn">Fetch & Add Product</button>
+        </form>
+
+        <!-- Naked Copenhagen Tab -->
+        <form id="naked-form" class="hidden">
+            <div class="form-section">
+                <h2>Paste Naked Copenhagen URL</h2>
+                <div class="form-group">
+                    <label>Product URL</label>
+                    <input type="url" class="form-input" id="naked-url" placeholder="https://nakedcph.com/products/..." required>
+                    <div class="form-hint">Paste any Naked Copenhagen product page URL</div>
+                </div>
+                <p class="auto-detect-note">🤖 Naked Copenhagen blocks Shopify APIs, so we parse the HTML. Brand, sizes, images, prices, and category are extracted from JSON-LD schema.</p>
             </div>
             <button type="submit" class="submit-btn">Fetch & Add Product</button>
         </form>
@@ -190,6 +205,7 @@
                         <option value="2">END Clothing (€11.99 shipping)</option>
                         <option value="1">AFEW Store (€7.99 shipping)</option>
                         <option value="3">SNS - Sneakersnstuff (shipping TBD)</option>
+                        <option value="4">Naked Copenhagen (shipping TBD)</option>
                     </select>
                 </div>
             </div>
@@ -271,6 +287,7 @@
                 document.getElementById('shopify-form').classList.toggle('hidden', tab !== 'shopify');
                 document.getElementById('end-form').classList.toggle('hidden', tab !== 'end');
                 document.getElementById('sns-form').classList.toggle('hidden', tab !== 'sns');
+                document.getElementById('naked-form').classList.toggle('hidden', tab !== 'naked');
                 document.getElementById('manual-form').classList.toggle('hidden', tab !== 'manual');
                 resultDiv.classList.add('hidden');
             });
@@ -297,6 +314,14 @@
             e.preventDefault();
             await submitProduct('/api/products/sns', {
                 product_url: document.getElementById('sns-url').value,
+            });
+        });
+
+        // Naked Copenhagen form
+        document.getElementById('naked-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await submitProduct('/api/products/naked', {
+                product_url: document.getElementById('naked-url').value,
             });
         });
 
