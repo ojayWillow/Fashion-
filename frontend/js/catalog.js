@@ -15,11 +15,8 @@ const sortSelect = document.getElementById('sort');
  */
 function shopifyImg(url, width) {
     if (!url) return '';
-    // Only transform Shopify CDN URLs
     if (!url.includes('cdn.shopify')) return url;
-    // Remove any existing Shopify size suffix
     url = url.replace(/_(pico|icon|thumb|small|compact|medium|large|grande|original|master|\d+x\d*|\d*x\d+)\./i, '.');
-    // Insert new size before file extension
     return url.replace(/(\.[a-z]{3,4})(\?.*)?$/i, `_${width}x$1$2`);
 }
 
@@ -30,7 +27,8 @@ async function loadStores() {
         stores.forEach(s => {
             const opt = document.createElement('option');
             opt.value = s.id;
-            opt.textContent = `${s.name} (\u20ac${s.shipping_cost} shipping)`;
+            const count = s.product_count || 0;
+            opt.textContent = `${s.name} (\u20ac${s.shipping_cost} shipping) \u00b7 ${count}`;
             storeFilter.appendChild(opt);
         });
     } catch (e) { console.warn('Could not load stores', e); }
@@ -43,8 +41,8 @@ async function loadBrands() {
         brandFilter.innerHTML = '<option value="">All Brands</option>';
         brands.forEach(b => {
             const opt = document.createElement('option');
-            opt.value = b;
-            opt.textContent = b;
+            opt.value = b.name;
+            opt.textContent = `${b.name} (${b.count})`;
             brandFilter.appendChild(opt);
         });
     } catch (e) { console.warn('Could not load brands', e); }
@@ -64,8 +62,9 @@ async function loadCategories() {
         };
         categories.forEach(c => {
             const opt = document.createElement('option');
-            opt.value = c;
-            opt.textContent = labels[c] || c.charAt(0).toUpperCase() + c.slice(1);
+            opt.value = c.name;
+            const label = labels[c.name] || c.name.charAt(0).toUpperCase() + c.name.slice(1);
+            opt.textContent = `${label} (${c.count})`;
             categoryFilter.appendChild(opt);
         });
     } catch (e) { console.warn('Could not load categories', e); }
@@ -83,9 +82,9 @@ async function loadSizes() {
         sizeFilter.innerHTML = '<option value="">All Sizes</option>';
         sizes.forEach(s => {
             const opt = document.createElement('option');
-            opt.value = s;
-            opt.textContent = s;
-            if (s === current) opt.selected = true;
+            opt.value = s.name;
+            opt.textContent = `${s.name} (${s.count})`;
+            if (s.name === current) opt.selected = true;
             sizeFilter.appendChild(opt);
         });
     } catch (e) { console.warn('Could not load sizes', e); }
@@ -140,13 +139,11 @@ function renderCard(p) {
     const catLabels = { sneakers: '\ud83d\udc5f', clothing: '\ud83d\udc55', accessories: '\ud83c\udfa9', kids: '\ud83e\udde1', toddler: '\ud83d\udc76' };
     const catIcon = catLabels[p.category] || '';
 
-    // Request 600px wide image for card grid (sharp on most screens incl. retina)
     const cardImgUrl = shopifyImg(p.image_url, 600);
     const imgHtml = p.image_url
         ? `<img src="${cardImgUrl}" alt="${p.name}" loading="lazy">`
         : '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted)">No image</div>';
 
-    // Render size pills (show max 8, then "+N more")
     let sizesHtml = '';
     if (p.sizes && p.sizes.length) {
         const maxShow = 8;
@@ -186,7 +183,6 @@ function esc(str) {
     return d.innerHTML;
 }
 
-// When category changes, reload sizes (different size systems)
 categoryFilter.addEventListener('change', () => {
     loadSizes();
     loadProducts();
