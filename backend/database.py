@@ -9,9 +9,11 @@ SCHEMA_PATH = Path(__file__).parent / "schema.sql"
 
 def get_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(str(DB_PATH), timeout=30.0)  # Wait up to 30s for locks
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")  # Enable Write-Ahead Logging for better concurrency
+    conn.isolation_level = None  # Autocommit mode — prevents long-held locks
     return conn
 
 
@@ -24,27 +26,23 @@ def init_db():
         conn.execute("SELECT category FROM products LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE products ADD COLUMN category TEXT NOT NULL DEFAULT 'sneakers'")
-        conn.commit()
         print("[FASHION-] Added 'category' column to products table")
     # Add size_original column if upgrading from older schema
     try:
         conn.execute("SELECT size_original FROM product_sizes LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE product_sizes ADD COLUMN size_original TEXT")
-        conn.commit()
         print("[FASHION-] Added 'size_original' column to product_sizes table")
     # Add status + fail_count columns if upgrading
     try:
         conn.execute("SELECT status FROM products LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE products ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
-        conn.commit()
         print("[FASHION-] Added 'status' column to products table")
     try:
         conn.execute("SELECT fail_count FROM products LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE products ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0")
-        conn.commit()
         print("[FASHION-] Added 'fail_count' column to products table")
     # Fix END Clothing shipping cost if it was seeded with old value
     conn.execute(
@@ -54,7 +52,6 @@ def init_db():
     conn.execute(
         "UPDATE stores SET free_ship_min = NULL WHERE base_url = 'https://www.endclothing.com'"
     )
-    conn.commit()
     conn.close()
     print(f"Database initialized at {DB_PATH}")
 
