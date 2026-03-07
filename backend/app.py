@@ -10,9 +10,10 @@ from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from database import get_db, init_db, insert_product, insert_images, insert_sizes, get_all_products, get_product_by_slug, get_store_by_platform
-from models import ManualProductInput, ShopifyFetchInput, EndFetchInput, ProductCardOut, ProductDetailOut, StoreOut
+from models import ManualProductInput, ShopifyFetchInput, EndFetchInput, SnsFetchInput, ProductCardOut, ProductDetailOut, StoreOut
 from fetchers.shopify import fetch_shopify_product
 from fetchers.end_clothing import fetch_end_product
+from fetchers.sns import fetch_sns_product
 from fetchers.manual import build_manual_product
 from stock_checker import run_stock_check, get_status as get_stock_status
 
@@ -240,6 +241,43 @@ def add_end_product(input: EndFetchInput):
     conn = get_db()
     store = get_store_by_platform(conn, product_data["_base_url"])
     store_id = store["id"] if store else 2  # default to END Clothing store id
+    product_data["store_id"] = store_id
+
+    if input.category_override:
+        product_data["category"] = input.category_override
+
+    try:
+        product_id = insert_product(conn, product_data)
+        insert_images(conn, product_id, product_data["images"])
+        insert_sizes(conn, product_id, product_data["sizes"])
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
+    finally:
+        conn.close()
+
+    return {
+        "id": product_id,
+        "slug": product_data["slug"],
+        "category": product_data.get("category", "sneakers"),
+        "message": "Product added",
+    }
+
+
+@app.post("/api/products/sns")
+def add_sns_product(input: SnsFetchInput):
+    """Fetch and add a product from SNS (Sneakersnstuff)."""
+    try:
+        product_data = fetch_sns_product(input.product_url)
+    except RuntimeError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch product: {e}")
+
+    conn = get_db()
+    store = get_store_by_platform(conn, product_data["_base_url"])
+    store_id = store["id"] if store else 3  # default to SNS store id
     product_data["store_id"] = store_id
 
     if input.category_override:
