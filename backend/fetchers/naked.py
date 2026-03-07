@@ -3,10 +3,10 @@
 Naked Copenhagen runs on Shopify but blocks the public .json and .js endpoints.
 Instead, we parse the HTML page to extract:
 - JSON-LD structured data (schema.org Product)
-- Shopify meta tags for variant availability
-- Embedded product data in window.__NEXT_DATA__ or similar
+- Shopify variant data embedded in JavaScript (with DKK prices)
+- Images and product metadata
 
-This is a legitimate use of publicly visible data.
+Note: Prices are in Danish Krone (DKK), not EUR.
 """
 import re
 import json
@@ -26,6 +26,10 @@ SESSION.headers.update({
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.5",
 })
+
+# DKK to EUR approximate conversion (for display purposes)
+# Note: You should use a real-time exchange rate API in production
+DKK_TO_EUR = 0.134
 
 
 def fetch_naked_product(product_url: str) -> dict:
@@ -102,88 +106,67 @@ def fetch_naked_product(product_url: str) -> dict:
 
     logger.info(f"Images from JSON-LD: {len(images)}")
 
-    # Pricing from JSON-LD offers
-    offers = json_ld.get('offers', {})
-    if isinstance(offers, list):
-        offers = offers[0] if offers else {}
-    
-    price_str = offers.get('price', '0')
-    currency = offers.get('priceCurrency', 'EUR')
-    
-    try:
-        sale_price = float(price_str)
-    except (ValueError, TypeError):
-        sale_price = 0.0
+    # Extract currency from meta tag or shop config
+    currency = 'DKK'  # Default for Naked Copenhagen
+    meta_currency = soup.find('meta', {'property': 'og:price:currency'})
+    if meta_currency:
+        currency = meta_currency.get('content', 'DKK')
+    logger.info(f"Currency: {currency}")
 
-    original_price = sale_price  # Naked doesn't show original price in JSON-LD
-
-    # Check for original price in HTML (look for strikethrough price)
-    price_section = soup.find('div', class_=re.compile(r'price', re.I))
-    if price_section:
-        compare_price = price_section.find(text=re.compile(r'€\d+'))
-        if compare_price:
-            match = re.search(r'€([\d,\.]+)', compare_price)
-            if match:
-                try:
-                    original_price = float(match.group(1).replace(',', ''))
-                    if original_price <= sale_price:
-                        original_price = sale_price
-                except ValueError:
-                    pass
-
-    discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
-
-    logger.info(f"Pricing: original={original_price}, sale={sale_price}, discount={discount_pct}%")
-
-    # Extract sizes and availability
-    sizes = []
-    
-    # Look for size selector in HTML
-    size_selectors = soup.find_all(['select', 'div'], class_=re.compile(r'size|variant', re.I))
-    
-    # Try to find variant data in script tags
+    # CRITICAL: Extract variant data for accurate pricing
+    # Naked CPH stores prices in cents: price=33000 means 330 DKK
     variant_data = None
     for script in soup.find_all('script'):
-        if script.string and 'variants' in script.string:
-            # Look for JSON variant data
-            match = re.search(r'"variants"\s*:\s*(\[.*?\])', script.string, re.DOTALL)
+        if script.string and '"variants"' in script.string:
+            # Look for JSON variant array with compare_at_price
+            match = re.search(r'"variants"\s*:\s*(\[[^\]]*compare_at_price[^\]]*\])', script.string, re.DOTALL)
             if match:
                 try:
                     variant_data = json.loads(match.group(1))
-                    logger.info(f"Found {len(variant_data)} variants in script")
+                    logger.info(f"Found {len(variant_data)} variants with pricing in script")
                     break
                 except json.JSONDecodeError:
                     continue
 
-    if variant_data:
-        for variant in variant_data:
-            size_label = variant.get('option1') or variant.get('title', '?')
-            available = variant.get('available', False)
-            variant_id = str(variant.get('id', ''))
-            
-            sizes.append({
-                "label": size_label,
-                "original_label": size_label,
-                "in_stock": available,
-                "variant_id": variant_id,
-            })
+    if not variant_data or len(variant_data) == 0:
+        raise ValueError("Could not find variant data with prices")
+
+    # Get prices from first variant (all variants have same price)
+    first_variant = variant_data[0]
+    sale_price_cents = first_variant.get('price', 0)
+    original_price_cents = first_variant.get('compare_at_price') or sale_price_cents
+
+    # Convert from cents to currency units
+    sale_price = sale_price_cents / 100.0
+    original_price = original_price_cents / 100.0
+
+    # Convert to EUR if needed
+    if currency == 'DKK':
+        sale_price_eur = round(sale_price * DKK_TO_EUR, 2)
+        original_price_eur = round(original_price * DKK_TO_EUR, 2)
+        logger.info(f"Pricing: {sale_price} DKK (~{sale_price_eur} EUR), original: {original_price} DKK (~{original_price_eur} EUR)")
+        # Use EUR for storage
+        sale_price = sale_price_eur
+        original_price = original_price_eur
     else:
-        # Fallback: try to extract from select options
-        size_select = soup.find('select', {'name': re.compile(r'size|id\[', re.I)})
-        if size_select:
-            for option in size_select.find_all('option'):
-                size_label = option.get_text(strip=True)
-                # Disabled options are usually out of stock
-                available = not option.has_attr('disabled')
-                variant_id = option.get('value', '')
-                
-                if size_label and size_label.lower() not in ['select size', 'size', '']:
-                    sizes.append({
-                        "label": size_label,
-                        "original_label": size_label,
-                        "in_stock": available,
-                        "variant_id": variant_id,
-                    })
+        logger.info(f"Pricing: {sale_price} {currency}, original: {original_price} {currency}")
+
+    discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
+    logger.info(f"Discount: {discount_pct}%")
+
+    # Extract sizes and availability from variant data
+    sizes = []
+    for variant in variant_data:
+        size_label = variant.get('option1') or variant.get('public_title') or variant.get('title', '?')
+        available = variant.get('available', False)
+        variant_id = str(variant.get('id', ''))
+        
+        sizes.append({
+            "label": size_label,
+            "original_label": size_label,
+            "in_stock": available,
+            "variant_id": variant_id,
+        })
 
     in_stock_count = sum(1 for s in sizes if s["in_stock"])
     any_in_stock = in_stock_count > 0
@@ -215,12 +198,17 @@ def fetch_naked_product(product_url: str) -> dict:
     title_parts = name.split('|')
     if len(title_parts) > 1:
         colorway = title_parts[-1].strip()
+    # Also try splitting by dash or hyphen
+    if not colorway and ' - ' in name:
+        parts = name.split(' - ')
+        if len(parts) > 1:
+            colorway = parts[-1].strip()
 
     return {
         "name": name,
         "brand": brand,
         "slug": handle,
-        "sku": None,  # Not available without API
+        "sku": first_variant.get('sku'),
         "colorway": colorway,
         "category": category,
         "gender": gender,
