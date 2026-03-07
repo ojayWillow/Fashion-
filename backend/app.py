@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
     logger.info("[FASHION-] Scheduler stopped.")
 
 
-app = FastAPI(title="Fashion Catalog API", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Fashion Catalog API", version="0.5.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,7 +56,7 @@ app.add_middleware(
 FRONTEND_DIR = (Path(__file__).resolve().parent.parent / "frontend")
 
 
-# ─── Stock Check Endpoints ─────────────────────────
+# ─── Stock Check Endpoints ─────────────────────
 
 @app.get("/api/stock-check/status")
 def stock_check_status():
@@ -78,17 +78,23 @@ def trigger_stock_check():
         raise HTTPException(status_code=500, detail=f"Stock check failed: {e}")
 
 
-# ─── Store Endpoints ─────────────────────────────
+# ─── Store Endpoints ─────────────────────────
 
-@app.get("/api/stores", response_model=list[StoreOut])
+@app.get("/api/stores")
 def list_stores():
     conn = get_db()
-    rows = conn.execute("SELECT * FROM stores").fetchall()
+    rows = conn.execute("""
+        SELECT s.*, COUNT(p.id) as product_count
+        FROM stores s
+        LEFT JOIN products p ON p.store_id = s.id AND p.status = 'active'
+        GROUP BY s.id
+        ORDER BY s.name
+    """).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-# ─── Product Endpoints ───────────────────────────
+# ─── Product Endpoints ───────────────────────
 
 @app.get("/api/products")
 def list_products(
@@ -325,44 +331,62 @@ def add_manual_product(input: ManualProductInput):
     return {"id": product_id, "slug": product_data["slug"], "message": "Product added"}
 
 
-# ─── Filter Endpoints ────────────────────────────
+# ─── Filter Endpoints ────────────────────────
 
 @app.get("/api/brands")
 def list_brands():
     conn = get_db()
-    rows = conn.execute("SELECT DISTINCT brand FROM products ORDER BY brand").fetchall()
+    rows = conn.execute("""
+        SELECT brand as name, COUNT(*) as count
+        FROM products
+        WHERE status = 'active'
+        GROUP BY brand
+        ORDER BY brand
+    """).fetchall()
     conn.close()
-    return [r["brand"] for r in rows]
+    return [dict(r) for r in rows]
 
 
 @app.get("/api/categories")
 def list_categories():
     conn = get_db()
-    rows = conn.execute("SELECT DISTINCT category FROM products ORDER BY category").fetchall()
+    rows = conn.execute("""
+        SELECT category as name, COUNT(*) as count
+        FROM products
+        WHERE status = 'active'
+        GROUP BY category
+        ORDER BY category
+    """).fetchall()
     conn.close()
-    return [r["category"] for r in rows]
+    return [dict(r) for r in rows]
 
 
 @app.get("/api/sizes")
 def list_sizes(category: Optional[str] = None):
     conn = get_db()
     if category:
-        rows = conn.execute(
-            """SELECT DISTINCT ps.size_label FROM product_sizes ps
-               JOIN products p ON ps.product_id = p.id
-               WHERE ps.in_stock = 1 AND p.category = ?
-               ORDER BY ps.size_label""",
-            (category,),
-        ).fetchall()
+        rows = conn.execute("""
+            SELECT ps.size_label as name, COUNT(DISTINCT ps.product_id) as count
+            FROM product_sizes ps
+            JOIN products p ON ps.product_id = p.id
+            WHERE ps.in_stock = 1 AND p.category = ? AND p.status = 'active'
+            GROUP BY ps.size_label
+            ORDER BY ps.size_label
+        """, (category,)).fetchall()
     else:
-        rows = conn.execute(
-            "SELECT DISTINCT size_label FROM product_sizes WHERE in_stock = 1 ORDER BY size_label"
-        ).fetchall()
+        rows = conn.execute("""
+            SELECT ps.size_label as name, COUNT(DISTINCT ps.product_id) as count
+            FROM product_sizes ps
+            JOIN products p ON ps.product_id = p.id
+            WHERE ps.in_stock = 1 AND p.status = 'active'
+            GROUP BY ps.size_label
+            ORDER BY ps.size_label
+        """).fetchall()
     conn.close()
-    return [r["size_label"] for r in rows]
+    return [dict(r) for r in rows]
 
 
-# ─── Serve Frontend ────────────────────────────
+# ─── Serve Frontend ────────────────────────
 
 try:
     css_dir = FRONTEND_DIR / "css"
