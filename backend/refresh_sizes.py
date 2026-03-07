@@ -108,7 +108,7 @@ def refresh_end_sizes(conn) -> dict:
     from fetchers._end_worker import _find_product_in_algolia, _parse_sizes
 
     products = conn.execute("""
-        SELECT p.id, p.name, p.product_url, p.category, p.gender
+        SELECT p.id, p.name, p.product_url, p.category
         FROM products p
         JOIN stores s ON p.store_id = s.id
         WHERE s.base_url = 'https://www.endclothing.com'
@@ -145,7 +145,7 @@ def refresh_end_sizes(conn) -> dict:
             elif gender_field in ("kids", "youth", "junior"):
                 gender = "kids"
             else:
-                gender = "men"  # END defaults to men's
+                gender = "men"
 
             category = p["category"] or detect_category(
                 p["name"], breadcrumbs=hit.get("department_hierarchy", [])
@@ -186,7 +186,7 @@ def refresh_end_sizes(conn) -> dict:
             logger.error(f"  {p['name']}: FAILED - {e}")
             failed += 1
 
-        time.sleep(1)  # Be gentle with Algolia
+        time.sleep(1)
 
     conn.commit()
     return {"total": total, "updated": updated, "failed": failed, "skipped": skipped}
