@@ -3,7 +3,7 @@
 Naked Copenhagen runs on Shopify but blocks the public .json and .js endpoints.
 Instead, we parse the HTML page to extract:
 - JSON-LD structured data (schema.org Product)
-- Shopify variant data embedded in JavaScript (with DKK prices)
+- Shopify product data embedded in JavaScript (with DKK prices)
 - Images and product metadata
 
 Note: Prices are in Danish Krone (DKK), not EUR.
@@ -113,28 +113,50 @@ def fetch_naked_product(product_url: str) -> dict:
         currency = meta_currency.get('content', 'DKK')
     logger.info(f"Currency: {currency}")
 
-    # CRITICAL: Extract variant data for accurate pricing
-    # Naked CPH stores prices in cents: price=33000 means 330 DKK
-    variant_data = None
+    # CRITICAL: Extract full product data with pricing
+    # Look for the complete product object that has compare_at_price at product level
+    product_data = None
     for script in soup.find_all('script'):
-        if script.string and '"variants"' in script.string:
-            # Look for JSON variant array with compare_at_price
-            match = re.search(r'"variants"\s*:\s*(\[[^\]]*compare_at_price[^\]]*\])', script.string, re.DOTALL)
-            if match:
+        if not script.string:
+            continue
+        
+        # Look for product object with compare_at_price fields
+        match = re.search(r'"product"\s*:\s*\{([^}]*"compare_at_price"[^}]*\})', script.string, re.DOTALL)
+        if match:
+            # Extract the full product JSON
+            # Need to find the complete object, not just snippet
+            product_match = re.search(r'"product"\s*:\s*(\{(?:[^{}]|\{[^{}]*\})*"compare_at_price"(?:[^{}]|\{[^{}]*\})*\})', script.string, re.DOTALL)
+            if product_match:
                 try:
-                    variant_data = json.loads(match.group(1))
-                    logger.info(f"Found {len(variant_data)} variants with pricing in script")
-                    break
-                except json.JSONDecodeError:
+                    product_json = product_match.group(1)
+                    # Fix any truncation by finding the closing brace properly
+                    # This is a simplified approach - may need refinement
+                    brace_count = 0
+                    end_pos = 0
+                    for i, char in enumerate(product_json):
+                        if char == '{':
+                            brace_count += 1
+                        elif char == '}':
+                            brace_count -= 1
+                            if brace_count == 0:
+                                end_pos = i + 1
+                                break
+                    
+                    if end_pos > 0:
+                        product_json = product_json[:end_pos]
+                        product_data = json.loads(product_json)
+                        logger.info(f"Found complete product data with pricing")
+                        break
+                except (json.JSONDecodeError, ValueError) as e:
+                    logger.debug(f"Failed to parse product JSON: {e}")
                     continue
 
-    if not variant_data or len(variant_data) == 0:
-        raise ValueError("Could not find variant data with prices")
+    if not product_data:
+        raise ValueError("Could not find complete product data with pricing")
 
-    # Get prices from first variant (all variants have same price)
-    first_variant = variant_data[0]
-    sale_price_cents = first_variant.get('price', 0)
-    original_price_cents = first_variant.get('compare_at_price') or sale_price_cents
+    # Get prices from product-level fields (in cents)
+    sale_price_cents = product_data.get('price', 0)
+    original_price_cents = product_data.get('compare_at_price') or product_data.get('compare_at_price_max') or sale_price_cents
 
     # Convert from cents to currency units
     sale_price = sale_price_cents / 100.0
@@ -154,12 +176,33 @@ def fetch_naked_product(product_url: str) -> dict:
     discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
     logger.info(f"Discount: {discount_pct}%")
 
+    # Extract variants for sizes
+    # First try from product_data
+    variant_data = product_data.get('variants', [])
+    
+    # If variants in product_data don't have full info, look for simpler variant array
+    if not variant_data or len(variant_data) == 0:
+        for script in soup.find_all('script'):
+            if script.string and '"variants"' in script.string:
+                match = re.search(r'"variants"\s*:\s*(\[[^\]]+\])', script.string)
+                if match:
+                    try:
+                        variant_data = json.loads(match.group(1))
+                        logger.info(f"Found {len(variant_data)} variants")
+                        break
+                    except json.JSONDecodeError:
+                        continue
+
+    if not variant_data or len(variant_data) == 0:
+        raise ValueError("Could not find variant data for sizes")
+
     # Extract sizes and availability from variant data
     sizes = []
     for variant in variant_data:
         size_label = variant.get('option1') or variant.get('public_title') or variant.get('title', '?')
         available = variant.get('available', False)
         variant_id = str(variant.get('id', ''))
+        sku = variant.get('sku', '')
         
         sizes.append({
             "label": size_label,
@@ -173,13 +216,18 @@ def fetch_naked_product(product_url: str) -> dict:
     logger.info(f"Sizes: {in_stock_count}/{len(sizes)} in stock")
 
     # Detect category from product type or title
-    product_type = soup.find('meta', {'property': 'og:type'})
-    product_type_str = product_type.get('content', '') if product_type else ''
+    product_type = product_data.get('type') or soup.find('meta', {'property': 'og:type'})
+    if isinstance(product_type, str):
+        product_type_str = product_type
+    else:
+        product_type_str = product_type.get('content', '') if product_type else ''
     
-    # Try to get tags from meta keywords
-    meta_keywords = soup.find('meta', {'name': 'keywords'})
-    tags = meta_keywords.get('content', '').split(',') if meta_keywords else []
-    tags = [t.strip() for t in tags]
+    # Try to get tags from product data or meta keywords
+    tags = product_data.get('tags', [])
+    if not tags:
+        meta_keywords = soup.find('meta', {'name': 'keywords'})
+        tags = meta_keywords.get('content', '').split(',') if meta_keywords else []
+    tags = [t.strip() for t in tags] if isinstance(tags, list) else []
 
     category = detect_category(name, product_type=product_type_str, tags=tags)
     logger.info(f"Category: {category}")
@@ -204,11 +252,14 @@ def fetch_naked_product(product_url: str) -> dict:
         if len(parts) > 1:
             colorway = parts[-1].strip()
 
+    # Get SKU from first variant
+    sku = variant_data[0].get('sku') if variant_data else None
+
     return {
         "name": name,
         "brand": brand,
         "slug": handle,
-        "sku": first_variant.get('sku'),
+        "sku": sku,
         "colorway": colorway,
         "category": category,
         "gender": gender,
