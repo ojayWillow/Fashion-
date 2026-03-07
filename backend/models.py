@@ -23,6 +23,12 @@ class SnsFetchInput(BaseModel):
     category_override: Optional[str] = None  # only set when user explicitly picks
 
 
+class NakedFetchInput(BaseModel):
+    product_url: str
+    featured: bool = False
+    category_override: Optional[str] = None  # only set when user explicitly picks
+
+
 class ManualProductInput(BaseModel):
     name: str
     brand: str
