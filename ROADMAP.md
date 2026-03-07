@@ -77,13 +77,11 @@
 - [x] END shipping cost correct in schema seed (€11.99)
 - [x] SNS store seeded (free shipping)
 
-## In Progress 🚧
-
 ### Phase 10: UI Polish
-- [ ] Show sizes on catalogue cards (at-a-glance)
-- [ ] Improve visual design / theme options
-- [ ] Mobile responsiveness improvements
-- [ ] Product count per filter
+- [x] Show sizes on catalogue cards (at-a-glance)
+- [x] Dark futuristic theme with accent glow effects
+- [x] Mobile responsiveness (grid, filters, size pills adapt)
+- [x] Product count per filter (brands, categories, sizes, stores)
 
 ## Planned 📋
 
