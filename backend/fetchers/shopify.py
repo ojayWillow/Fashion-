@@ -86,39 +86,6 @@ def _scrape_afew_cdn_images(product_url: str) -> list[str]:
         return []
 
 
-def _normalize_price(price_value) -> float:
-    """Convert Shopify price to float, handling both cents and currency unit formats.
-    
-    Shopify's .json endpoint returns prices as strings in cents (e.g., "4800" for $48.00).
-    However, some stores may have different configurations.
-    
-    Detection logic:
-    - If price is a string and contains a decimal point → already in currency units
-    - If price is >= 100 and has no decimal → likely in cents, divide by 100
-    - If price is < 100 and has no decimal → ambiguous, but likely currency units for sale items
-    """
-    if price_value is None:
-        return 0.0
-    
-    price_str = str(price_value)
-    price_float = float(price_str)
-    
-    # If it has a decimal point in the string, it's already in currency units
-    if '.' in price_str:
-        return price_float
-    
-    # If >= 100 and no decimal, it's likely cents (e.g., 4800 = $48.00)
-    # This works for most currencies (EUR, USD, GBP, etc.)
-    if price_float >= 100:
-        return price_float / 100.0
-    
-    # If < 100, could be either:
-    # - Already in currency units (e.g., 45.00 stored as 45)
-    # - In cents for items under $1.00 (e.g., 50 cents)
-    # We'll assume currency units since sub-$1 items are rare
-    return price_float
-
-
 def fetch_shopify_product(product_url: str) -> dict:
     parsed = urlparse(product_url)
     base_url = f"{parsed.scheme}://{parsed.netloc}"
@@ -166,25 +133,20 @@ def fetch_shopify_product(product_url: str) -> dict:
     gender = detect_gender_from_tags(tags=raw_tags, name=json_data["title"])
     logger.info(f"Gender: {gender}")
 
-    # Pricing - normalize prices from Shopify's format
+    # Pricing
     original_price = None
     sale_price = None
     for v in json_variants:
         cap = v.get("compare_at_price")
         price = v.get("price")
-        if cap and price:
-            cap_normalized = _normalize_price(cap)
-            price_normalized = _normalize_price(price)
-            if cap_normalized > price_normalized:
-                original_price = cap_normalized
-                sale_price = price_normalized
-                logger.info(f"Price found: {price} → €{sale_price:.2f}, was {cap} → €{original_price:.2f}")
-                break
+        if cap and price and float(cap) > float(price):
+            original_price = float(cap)
+            sale_price = float(price)
+            break
 
     if original_price is None:
-        sale_price = _normalize_price(json_variants[0]["price"])
+        sale_price = float(json_variants[0]["price"])
         original_price = sale_price
-        logger.info(f"No sale price, regular: {json_variants[0]['price']} → €{sale_price:.2f}")
 
     discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
 
