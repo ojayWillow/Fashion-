@@ -40,7 +40,7 @@ US_TODDLER_TO_EU = {
 }
 
 # Clothing sizes pass through
-_CLOTHING_SIZES = {'xxs', 'xs', 's', 'm', 'l', 'xl', 'xxl', 'xxxl', '2xl', '3xl', '4xl', 'one size', 'os'}
+_CLOTHING_SIZES = {'xxs', 'xs', 's', 'm', 'l', 'xl', 'xxl', 'xxxl', '2xs', '2xl', '3xl', '4xl', 'one size', 'os'}
 
 
 def _is_eu_size(num_str: str) -> bool:
@@ -61,41 +61,80 @@ def _is_us_size(num_str: str) -> bool:
         return False
 
 
-def convert_to_eu(raw_label: str, category: str = "sneakers") -> str:
+def detect_gender_from_tags(tags: list[str] | None = None, name: str = "") -> str:
+    """Detect product gender from store tags or product name.
+
+    Returns: 'women', 'men', 'kids', 'toddler', or 'unisex'
+    """
+    text_parts = [name.lower()]
+    for tag in (tags or []):
+        text_parts.append(tag.lower())
+
+    text = " ".join(text_parts)
+
+    # Check tags first (most reliable)
+    for tag in (tags or []):
+        tl = tag.lower().strip()
+        if tl in ("gender:women", "gender:woman", "gender:female"):
+            return "women"
+        if tl in ("gender:men", "gender:man", "gender:male"):
+            return "men"
+        if tl in ("gender:kids", "gender:youth", "gender:junior"):
+            return "kids"
+        if tl in ("gender:toddler", "gender:infant", "gender:baby"):
+            return "toddler"
+        if tl in ("gender:unisex",):
+            return "unisex"
+
+    # Fallback: check product name for common keywords
+    wmns_words = ['wmns', 'womens', "women's", 'woman', 'w ', ' w']
+    kids_words = ['gs', 'grade school', 'junior', 'youth', 'kids', 'big kid', 'little kid']
+    toddler_words = ['td', 'toddler', 'infant', 'baby', 'crib']
+
+    if any(w in text for w in toddler_words):
+        return "toddler"
+    if any(w in text for w in kids_words):
+        return "kids"
+    if any(w in text for w in wmns_words):
+        return "women"
+
+    return "unisex"
+
+
+def convert_to_eu(raw_label: str, category: str = "sneakers", gender: str = "unisex") -> str:
     """Convert a size label to EU format. Returns the EU size string.
-    
+
+    Args:
+        raw_label: The raw size string from the store (e.g. "9.5", "US 8", "42")
+        category: Product category ('sneakers', 'clothing', 'accessories', etc.)
+        gender: Product gender ('men', 'women', 'kids', 'toddler', 'unisex')
+
     Handles formats like:
     - "42" or "42.5" (already EU) -> "42" / "42.5"
     - "US 9.5" or "US9.5" -> "43"
     - "UK 8" -> "42"
-    - "9.5" (bare number, ambiguous) -> detect by range
+    - "9.5" (bare number, ambiguous) -> detect by range + gender
     - "EU 42 / US 9.5" (combo) -> "42"
     - "S", "M", "L" (clothing) -> pass through unchanged
     """
     label = raw_label.strip()
     label_lower = label.lower()
-    
+
     # Clothing sizes pass through
     if label_lower in _CLOTHING_SIZES:
         return label.upper()
-    
+
     # Combo format: "EU 42 / US 9.5" -> extract EU part
     eu_match = re.search(r'EU\s*([\d]+\.?[\d]*)', label, re.IGNORECASE)
     if eu_match:
         return eu_match.group(1)
-    
+
     # Explicit "US X" format
     us_match = re.match(r'^US\s*([\d]+\.?[\d]*)$', label, re.IGNORECASE)
     if us_match:
         num = us_match.group(1)
-        if category == 'toddler' and num in US_TODDLER_TO_EU:
-            return US_TODDLER_TO_EU[num]
-        if category == 'kids' and num in US_KIDS_TO_EU:
-            return US_KIDS_TO_EU[num]
-        if num in US_MENS_TO_EU:
-            return US_MENS_TO_EU[num]
-        return label  # can't convert, keep original
-    
+        return _convert_us_to_eu(num, category, gender)
+
     # Explicit "UK X" format
     uk_match = re.match(r'^UK\s*([\d]+\.?[\d]*)$', label, re.IGNORECASE)
     if uk_match:
@@ -103,24 +142,40 @@ def convert_to_eu(raw_label: str, category: str = "sneakers") -> str:
         if num in UK_TO_EU:
             return UK_TO_EU[num]
         return label
-    
+
     # Bare number — detect if EU or US by range
     num_match = re.match(r'^([\d]+\.?[\d]*)$', label)
     if num_match:
         num = num_match.group(1)
         val = float(num)
-        
+
         # EU range: 18-55 (covers toddler through adult)
         if val >= 18:
             return num  # already EU
-        
-        # US range: 2-16 -> convert
-        if category == 'toddler' and num in US_TODDLER_TO_EU:
-            return US_TODDLER_TO_EU[num]
-        if category == 'kids' and num in US_KIDS_TO_EU:
-            return US_KIDS_TO_EU[num]
-        if num in US_MENS_TO_EU:
-            return US_MENS_TO_EU[num]
-    
+
+        # US range: 2-16 -> convert using gender-aware table
+        return _convert_us_to_eu(num, category, gender)
+
     # Can't parse — return as-is
     return label
+
+
+def _convert_us_to_eu(num: str, category: str, gender: str) -> str:
+    """Convert a US size number to EU using the correct table based on gender/category."""
+    if category == 'toddler' or gender == 'toddler':
+        if num in US_TODDLER_TO_EU:
+            return US_TODDLER_TO_EU[num]
+
+    if category == 'kids' or gender == 'kids':
+        if num in US_KIDS_TO_EU:
+            return US_KIDS_TO_EU[num]
+
+    if gender == 'women':
+        if num in US_WOMENS_TO_EU:
+            return US_WOMENS_TO_EU[num]
+        # Fall through to men's for large women's sizes (12+)
+
+    if num in US_MENS_TO_EU:
+        return US_MENS_TO_EU[num]
+
+    return num  # can't convert, return as-is
