@@ -33,6 +33,25 @@ AFEW_CDN_PATTERN = re.compile(
 AFEW_CDN_PREFERRED_RES = "1200"  # Good balance of quality vs file size
 
 
+def _normalize_price(price_str: str) -> float:
+    """Convert Shopify price to float, auto-detecting cents vs currency units.
+    
+    Some Shopify stores return prices in cents (11995 for €119.95),
+    others return them in currency units (119.95 for €119.95).
+    
+    Detection logic: if price > 1000, assume it's in cents and divide by 100.
+    This handles the 99.9% case correctly (most sneakers are under €1000).
+    """
+    price = float(price_str)
+    
+    # If price is unreasonably high (>1000), it's likely in cents
+    if price > 1000:
+        logger.debug(f"Price {price} looks like cents, converting to currency units")
+        return price / 100
+    
+    return price
+
+
 def _scrape_afew_cdn_images(product_url: str) -> list[str]:
     """Scrape AFEW's custom CDN packshot images from the product HTML.
 
@@ -133,19 +152,22 @@ def fetch_shopify_product(product_url: str) -> dict:
     gender = detect_gender_from_tags(tags=raw_tags, name=json_data["title"])
     logger.info(f"Gender: {gender}")
 
-    # Pricing
+    # Pricing (with auto-detection of cents vs currency units)
     original_price = None
     sale_price = None
     for v in json_variants:
         cap = v.get("compare_at_price")
         price = v.get("price")
-        if cap and price and float(cap) > float(price):
-            original_price = float(cap)
-            sale_price = float(price)
-            break
+        if cap and price:
+            cap_normalized = _normalize_price(cap)
+            price_normalized = _normalize_price(price)
+            if cap_normalized > price_normalized:
+                original_price = cap_normalized
+                sale_price = price_normalized
+                break
 
     if original_price is None:
-        sale_price = float(json_variants[0]["price"])
+        sale_price = _normalize_price(json_variants[0]["price"])
         original_price = sale_price
 
     discount_pct = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
