@@ -15,10 +15,11 @@ from fastapi.responses import FileResponse
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from database import get_db, init_db, insert_product, insert_images, insert_sizes, get_all_products, get_product_by_slug, get_store_by_platform
-from models import ManualProductInput, ShopifyFetchInput, EndFetchInput, SnsFetchInput, ProductCardOut, ProductDetailOut, StoreOut
+from models import ManualProductInput, ShopifyFetchInput, EndFetchInput, SnsFetchInput, NakedFetchInput, ProductCardOut, ProductDetailOut, StoreOut
 from fetchers.shopify import fetch_shopify_product
 from fetchers.end_clothing import fetch_end_product
 from fetchers.sns import fetch_sns_product
+from fetchers.naked import fetch_naked_product
 from fetchers.manual import build_manual_product
 from stock_checker import run_stock_check, get_status as get_stock_status
 from auth import check_password, create_session_token, is_authenticated, require_auth, COOKIE_NAME, SESSION_MAX_AGE
@@ -48,7 +49,7 @@ async def lifespan(app: FastAPI):
     logger.info("[FASHION-] Scheduler stopped.")
 
 
-app = FastAPI(title="Fashion Catalog API", version="0.6.0", lifespan=lifespan)
+app = FastAPI(title="Fashion Catalog API", version="0.7.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -340,6 +341,43 @@ def add_sns_product(input: SnsFetchInput, request: Request):
     conn = get_db()
     store = get_store_by_platform(conn, product_data["_base_url"])
     store_id = store["id"] if store else 3
+    product_data["store_id"] = store_id
+
+    if input.category_override:
+        product_data["category"] = input.category_override
+
+    try:
+        conn.execute("BEGIN")
+        product_id = insert_product(conn, product_data)
+        insert_images(conn, product_id, product_data["images"])
+        insert_sizes(conn, product_id, product_data["sizes"])
+        conn.execute("COMMIT")
+    except Exception as e:
+        conn.execute("ROLLBACK")
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
+    
+    conn.close()
+    return {
+        "id": product_id,
+        "slug": product_data["slug"],
+        "category": product_data.get("category", "sneakers"),
+        "message": "Product added",
+    }
+
+
+@app.post("/api/products/naked")
+def add_naked_product(input: NakedFetchInput, request: Request):
+    """Fetch and add a product from Naked Copenhagen. Requires auth."""
+    require_auth(request)
+    try:
+        product_data = fetch_naked_product(input.product_url)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch product: {e}")
+
+    conn = get_db()
+    store = get_store_by_platform(conn, product_data["_base_url"])
+    store_id = store["id"] if store else 4  # Assume store_id 4 for Naked Copenhagen
     product_data["store_id"] = store_id
 
     if input.category_override:
