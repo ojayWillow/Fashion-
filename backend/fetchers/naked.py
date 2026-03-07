@@ -72,15 +72,32 @@ def fetch_naked_product(product_url: str) -> dict:
     brand = json_ld.get('brand', {}).get('name', 'Unknown Brand') if isinstance(json_ld.get('brand'), dict) else json_ld.get('brand', 'Unknown Brand')
     description = json_ld.get('description', '')
 
-    # Images from JSON-LD
+    # Images from JSON-LD (can be string, list of strings, or list of dicts)
     images = []
     json_ld_images = json_ld.get('image', [])
+    
+    # Normalize to list
     if isinstance(json_ld_images, str):
         json_ld_images = [json_ld_images]
+    elif isinstance(json_ld_images, dict):
+        json_ld_images = [json_ld_images]
     
-    for i, img_url in enumerate(json_ld_images):
+    for i, img_item in enumerate(json_ld_images):
+        # Extract URL from string or dict format
+        if isinstance(img_item, str):
+            img_url = img_item
+        elif isinstance(img_item, dict):
+            img_url = img_item.get('url') or img_item.get('@url') or img_item.get('contentUrl', '')
+        else:
+            continue
+        
+        if not img_url:
+            continue
+            
+        # Fix protocol-relative URLs
         if img_url.startswith('//'):
             img_url = 'https:' + img_url
+        
         images.append({"url": img_url, "alt": f"{name} - image {i+1}"})
 
     logger.info(f"Images from JSON-LD: {len(images)}")
