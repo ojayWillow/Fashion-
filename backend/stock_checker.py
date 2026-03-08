@@ -9,9 +9,13 @@ Requires 3 consecutive failures before marking unavailable.
 Run directly: python stock_checker.py
 Or import run_stock_check() — auto-scheduled via APScheduler in app.py.
 """
+import csv
 import time
 import logging
+from pathlib import Path
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 from database import get_db
 from utils.http_retry import request_with_retry
 
@@ -26,6 +30,39 @@ MAX_FAIL_COUNT = 3
 
 # Delay between products to avoid hammering stores
 CHECK_DELAY = 1.0
+
+REMOVAL_LOG = Path(__file__).resolve().parent.parent / "data" / "removed_products.csv"
+
+
+# ── Removal audit log ────────────────────────────────────────────
+
+def _log_removal(slug: str, product_url: str, reason: str, fail_count: int, last_known_price: float):
+    """Append a row to the removal audit CSV."""
+    write_header = not REMOVAL_LOG.exists()
+    REMOVAL_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(REMOVAL_LOG, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow(["timestamp", "slug", "product_url", "store_domain", "reason", "fail_count", "last_known_price"])
+        domain = urlparse(product_url).netloc
+        writer.writerow([
+            datetime.now(timezone.utc).isoformat(),
+            slug,
+            product_url,
+            domain,
+            reason,
+            fail_count,
+            last_known_price,
+        ])
+
+
+def read_removal_log() -> list[dict]:
+    """Read the removal audit CSV and return as list of dicts."""
+    if not REMOVAL_LOG.exists():
+        return []
+    with open(REMOVAL_LOG, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        return list(reader)
 
 
 # ── Standardized result format ────────────────────────────────────
@@ -51,7 +88,7 @@ def check_shopify_stock(product_url: str, handle: str) -> dict:
     js_url = f"{base}/products/{handle}.js"
 
     try:
-        resp = request_with_retry(js_url, max_retries=3, timeout=15)
+        resp = request_with_retry(js_url, max_retries=2, timeout=8)
 
         if resp.status_code == 404:
             return {
@@ -105,8 +142,8 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
     if not sku:
         # Try to extract SKU from URL
         import re
-        from urllib.parse import urlparse
-        slug = urlparse(product_url).path.rstrip("/").split("/")[-1].replace(".html", "")
+        from urllib.parse import urlparse as _urlparse
+        slug = _urlparse(product_url).path.rstrip("/").split("/")[-1].replace(".html", "")
         m = re.search(r"([a-zA-Z]{1,5}\d{3,5}-\d{2,4})$", slug)
         if m:
             sku = m.group(1).upper()
@@ -141,7 +178,7 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
             headers=ALGOLIA_HEADERS,
             json={"query": sku, "hitsPerPage": 5},
             impersonate="chrome",
-            timeout=15,
+            timeout=10,
         )
 
         if resp.status_code != 200:
@@ -228,21 +265,15 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
 # ── Dispatcher ───────────────────────────────────────────────────
 
 def check_product_stock(platform: str, product_url: str, slug: str, sku: str | None) -> dict:
-    """Route stock check to the correct store-specific function.
-
-    Every new store just needs a new elif branch here and its own
-    check function that returns the standardized result dict.
-    """
+    """Route stock check to the correct store-specific function."""
     if platform == "shopify":
         handle = product_url.rstrip("/").split("/products/")[-1].split("?")[0]
         return check_shopify_stock(product_url, handle)
 
     elif platform == "custom":
-        # END Clothing (and future custom stores)
         if "endclothing.com" in product_url:
             return check_end_stock(product_url, sku)
 
-    # Unknown platform — don't assume anything
     return {
         "success": False,
         "online": None,
@@ -253,6 +284,42 @@ def check_product_stock(platform: str, product_url: str, slug: str, sku: str | N
     }
 
 
+# ── Worker: check all products for one domain ────────────────────
+
+def _check_domain_batch(products_for_domain: list[dict]) -> list[tuple[dict, dict]]:
+    """Check products for a single domain sequentially.
+    Returns (product, result) tuples.
+    Skips remaining products if domain is detected as down.
+    """
+    results = []
+    domain_dead = False
+
+    for p in products_for_domain:
+        if domain_dead:
+            results.append((p, {
+                "success": False, "online": None, "any_in_stock": None,
+                "sizes_available": 0, "sizes": [],
+                "error": "SKIPPED — domain unreachable this run",
+                "_skipped": True,
+            }))
+            continue
+
+        result = check_product_stock(p["platform"], p["product_url"], p["slug"], p["sku"])
+        result["_skipped"] = False
+
+        # Detect dead domain from DNS/timeout errors
+        if not result["success"] and result.get("error"):
+            err = result["error"]
+            if "NameResolution" in err or "timed out" in err or "ConnectTimeout" in err:
+                domain_dead = True
+                logger.warning(f"  Domain down: {urlparse(p['product_url']).netloc} — skipping remaining products")
+
+        results.append((p, result))
+        time.sleep(CHECK_DELAY)
+
+    return results
+
+
 # ── Main stock check loop ────────────────────────────────────────
 
 def run_stock_check():
@@ -260,9 +327,11 @@ def run_stock_check():
 
     Safety rules:
     - Failed checks (network errors, timeouts) do NOT change product status
-    - Products need 3 consecutive failures before being marked unavailable
-    - Only confident "online=False" results mark products offline
+    - Network errors do NOT increment fail_count (prevents false removals)
+    - Products need 3 consecutive "confirmed gone" results before removal
+    - Only confident "online=False" results increment fail_count
     - Successful checks reset the fail counter
+    - Domains that fail with DNS/timeout are skipped for remaining products
     """
     global last_run, last_result
 
@@ -271,38 +340,60 @@ def run_stock_check():
 
     products = conn.execute(
         """SELECT p.id, p.slug, p.product_url, p.sku, p.in_stock,
-                  p.fail_count, s.platform
+                  p.fail_count, p.sale_price, s.platform
         FROM products p
         JOIN stores s ON p.store_id = s.id"""
     ).fetchall()
+
+    # Convert rows to dicts for thread safety
+    products = [dict(p) for p in products]
 
     total = len(products)
     checked = 0
     updated = 0
     failed = 0
+    skipped = 0
     marked_offline = 0
 
     logger.info(f"Stock check started — {total} products")
 
+    # Group products by store domain
+    domain_groups: dict[str, list[dict]] = {}
     for p in products:
+        domain = urlparse(p["product_url"]).netloc
+        domain_groups.setdefault(domain, []).append(p)
+
+    # Run domains concurrently, products within each domain sequentially
+    all_results: list[tuple[dict, dict]] = []
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {
+            pool.submit(_check_domain_batch, group): domain
+            for domain, group in domain_groups.items()
+        }
+        for future in as_completed(futures):
+            domain = futures[future]
+            try:
+                all_results.extend(future.result())
+            except Exception as e:
+                logger.error(f"  Domain batch failed for {domain}: {e}")
+
+    # Process all results in main thread (sqlite is not thread-safe)
+    for p, result in all_results:
         product_id = p["id"]
-        platform = p["platform"]
         current_fail_count = p["fail_count"] or 0
 
-        result = check_product_stock(
-            platform=platform,
-            product_url=p["product_url"],
-            slug=p["slug"],
-            sku=p["sku"],
-        )
+        # Skipped products — domain was down, don't touch anything
+        if result.get("_skipped"):
+            skipped += 1
+            logger.info(f"  {p['slug']}: SKIPPED (domain down)")
+            continue
+
         checked += 1
 
         if result["success"]:
-            # ✅ Check succeeded — reset fail counter
-            new_fail_count = 0
-
+            # ✅ Check succeeded
             if result["online"] is False:
-                # Product confirmed gone from store
+                # Product confirmed gone from store — increment fail_count
                 new_fail_count = current_fail_count + 1
 
                 if new_fail_count >= MAX_FAIL_COUNT:
@@ -315,6 +406,13 @@ def run_stock_check():
                         (new_fail_count, now, now, product_id),
                     )
                     marked_offline += 1
+                    _log_removal(
+                        slug=p["slug"],
+                        product_url=p["product_url"],
+                        reason="Product page returned 404 / not found",
+                        fail_count=new_fail_count,
+                        last_known_price=p.get("sale_price", 0),
+                    )
                     logger.warning(f"  {p['slug']}: REMOVED (confirmed after {new_fail_count} checks)")
                 else:
                     # Not yet confirmed — increment but don't change stock
@@ -326,7 +424,7 @@ def run_stock_check():
                     )
                     logger.info(f"  {p['slug']}: not found ({new_fail_count}/{MAX_FAIL_COUNT} strikes)")
             else:
-                # Product is online — update stock status
+                # Product is online — update stock status and reset fail counter
                 in_stock = 1 if result["any_in_stock"] else 0
                 conn.execute(
                     """UPDATE products
@@ -336,7 +434,7 @@ def run_stock_check():
                     (in_stock, now, now, product_id),
                 )
 
-                # Update per-size stock (Shopify: by variant_id, END: by size_label)
+                # Update per-size stock
                 for size in result.get("sizes", []):
                     in_stock_val = 1 if size["in_stock"] else 0
                     if size.get("variant_id"):
@@ -347,7 +445,6 @@ def run_stock_check():
                             (in_stock_val, now, product_id, size["variant_id"]),
                         )
                     else:
-                        # Match by size label (END Clothing, manual)
                         conn.execute(
                             """UPDATE product_sizes
                             SET in_stock = ?, last_checked = ?
@@ -360,16 +457,15 @@ def run_stock_check():
                 updated += 1
 
         else:
-            # ❌ Check failed (network error, timeout, etc.)
-            # Do NOT change product status — just log and increment fail count
-            new_fail_count = current_fail_count + 1
+            # ❌ Network error — do NOT increment fail_count
+            # Only update last_checked so we know we tried
             conn.execute(
-                "UPDATE products SET fail_count = ?, last_checked = ? WHERE id = ?",
-                (new_fail_count, now, product_id),
+                "UPDATE products SET last_checked = ? WHERE id = ?",
+                (now, product_id),
             )
             failed += 1
             logger.error(
-                f"  {p['slug']}: CHECK FAILED ({new_fail_count}/{MAX_FAIL_COUNT}) — {result['error']}"
+                f"  {p['slug']}: CHECK FAILED (network) — {result['error']}"
             )
 
         # Log to stock_checks table
@@ -385,8 +481,6 @@ def run_stock_check():
             ),
         )
 
-        time.sleep(CHECK_DELAY)
-
     conn.commit()
     conn.close()
 
@@ -396,6 +490,7 @@ def run_stock_check():
         "checked": checked,
         "updated": updated,
         "failed_checks": failed,
+        "skipped": skipped,
         "marked_offline": marked_offline,
     }
     logger.info(f"Stock check complete: {last_result}")

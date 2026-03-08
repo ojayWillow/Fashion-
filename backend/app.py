@@ -21,7 +21,7 @@ from fetchers.end_clothing import fetch_end_product
 from fetchers.sns import fetch_sns_product
 from fetchers.naked import fetch_naked_product
 from fetchers.manual import build_manual_product
-from stock_checker import run_stock_check, get_status as get_stock_status
+from stock_checker import run_stock_check, get_status as get_stock_status, read_removal_log
 from auth import check_password, create_session_token, is_authenticated, require_auth, COOKIE_NAME, SESSION_MAX_AGE
 
 logger = logging.getLogger("fashion")
@@ -40,6 +40,8 @@ async def lifespan(app: FastAPI):
         id="stock_checker",
         replace_existing=True,
         max_instances=1,
+        misfire_grace_time=300,
+        coalesce=True,
     )
     scheduler.start()
     logger.info("[FASHION-] Server ready! Stock checker scheduled every 30 min.")
@@ -115,6 +117,12 @@ def trigger_stock_check(request: Request):
         return {"message": "Stock check completed", "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Stock check failed: {e}")
+
+
+@app.get("/api/removed-products")
+def list_removed_products():
+    """Return the removal audit log as JSON for review."""
+    return read_removal_log()
 
 
 # ─── Store Endpoints ─────────────────────────
