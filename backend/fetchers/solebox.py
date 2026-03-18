@@ -8,11 +8,19 @@ Data strategy:
      - The products/{id} blob contains variants, stock, sizes, prices
   3. Parse and normalise into the standard product dict
 
+Image strategy:
+  Solebox CDN serves images from asset.solebox.com/images/ with Cloudinary transforms.
+  Full-size product images use the w_680,h_680 transform.
+  We extract the product's own image set by:
+    1. Finding the product image ID from the first JSON-LD image URL (e.g. "02481113")
+    2. Collecting all w_680 URLs in the HTML that contain that same image ID
+  This reliably gets all angles (front, back, side etc.) without false positives.
+
 Price structure (Scayle):
-  - price.withTax        = current price in cents (e.g. 12999 = 129.99)
+  - price.withTax         = current price in cents (e.g. 2499 = 24.99)
   - price.wasPriceNumeric = original price in cents when on sale
-  - stock.quantity > 0   = in stock
-  - sizeMap.sizeEu       = EU size label
+  - stock.quantity > 0    = in stock
+  - sizeMap.sizeEu        = EU size label
 """
 import re
 import json
@@ -84,56 +92,56 @@ def _extract_ngsw_product(html: str) -> dict | None:
     return None
 
 
-def _extract_all_images(html: str, name: str, json_ld: dict) -> list:
-    """Extract all product images from multiple sources, deduplicating by URL."""
-    seen = set()
+def _extract_product_images(html: str, name: str, json_ld: dict) -> list:
+    """Extract full-size product images from asset.solebox.com.
+
+    Strategy:
+    - The JSON-LD image field contains the first image URL which includes the
+      product's numeric image ID (e.g. "02481113").
+    - We use that ID to find all w_680,h_680 CDN URLs for this specific product,
+      which are the full-size gallery images Solebox shows on the product page.
+    - Falls back to just the JSON-LD image if we can't extract the ID.
+    """
     images = []
+    seen = set()
 
-    def add(url, alt=""):
-        # Normalise: strip query strings for dedup but keep original URL
-        base = url.split('?')[0]
-        if base not in seen and url not in seen:
-            seen.add(base)
+    def add(url):
+        if url and url not in seen:
             seen.add(url)
-            images.append({"url": url, "alt": alt or name})
+            images.append({"url": url, "alt": name})
 
-    # 1. JSON-LD image field (may be str or list)
+    # Step 1: get product image ID from the JSON-LD image URL
+    # e.g. "https://asset.solebox.com/images/f_auto,q_100/02481113_1/..."
     ld_image = json_ld.get("image", "")
-    if isinstance(ld_image, str) and ld_image:
-        add(ld_image)
-    elif isinstance(ld_image, list):
-        for img in ld_image:
-            url = img if isinstance(img, str) else img.get("url", "")
-            if url:
+    first_url = ld_image if isinstance(ld_image, str) else (ld_image[0] if isinstance(ld_image, list) and ld_image else "")
+
+    image_id = None
+    id_match = re.search(r'/images/[^/]+/([0-9]{8})_', first_url)
+    if id_match:
+        image_id = id_match.group(1)
+        logger.info(f"Solebox product image ID: {image_id}")
+
+    if image_id:
+        # Step 2: find all full-size (w_680) URLs for this product's image ID
+        # Pattern: asset.solebox.com/images/<transforms>/w_680,h_680/<id>_<n>/<slug>
+        pattern = re.compile(
+            r'(https://asset\.solebox\.com/images/[^\s"]+w_680[^\s"]*/' + re.escape(image_id) + r'_[0-9]+/[^\s"]+)',
+            re.IGNORECASE,
+        )
+        for url in pattern.findall(html):
+            add(url)
+        logger.info(f"Found {len(images)} full-size images for product ID {image_id}")
+
+    # Fallback: use JSON-LD image directly if we got nothing
+    if not images:
+        logger.warning("Could not find w_680 images, falling back to JSON-LD image")
+        if isinstance(ld_image, str) and ld_image:
+            add(ld_image)
+        elif isinstance(ld_image, list):
+            for img in ld_image:
+                url = img if isinstance(img, str) else img.get("url", "")
                 add(url)
 
-    # 2. og:image meta tags
-    for url in re.findall(r'<meta[^>]+property="og:image"[^>]+content="([^"]+)"', html):
-        add(url)
-    for url in re.findall(r'<meta[^>]+content="([^"]+)"[^>]+property="og:image"', html):
-        add(url)
-
-    # 3. Scayle/ngsw product images embedded in the serialised cache blob
-    # These appear as CDN image URLs ending in common image extensions
-    cdn_pattern = re.compile(
-        r'https://cdn\.scayle\.com/[^"\s\\]+\.(?:jpg|jpeg|png|webp)(?:\?[^"\s\\]*)?',
-        re.IGNORECASE,
-    )
-    for url in cdn_pattern.findall(html):
-        # Skip tiny thumbnails (width < 200 in URL params) and swatch images
-        if 'width=1' in url or 'width=5' in url or 'width=6' in url or 'width=7' in url or 'width=8' in url or 'width=9' in url:
-            continue
-        add(url)
-
-    # 4. Any media.solebox.com or images.solebox.com URLs
-    solebox_img = re.compile(
-        r'https://(?:media|images)\.solebox\.com/[^"\s\\]+\.(?:jpg|jpeg|png|webp)(?:\?[^"\s\\]*)?',
-        re.IGNORECASE,
-    )
-    for url in solebox_img.findall(html):
-        add(url)
-
-    logger.info(f"Collected {len(images)} unique images")
     return images
 
 
@@ -177,8 +185,8 @@ def fetch_solebox_product(product_url: str) -> dict:
     ld_price     = offers.get("price")
     ld_available = offers.get("availability", "") == "https://schema.org/InStock"
 
-    # ── Images (all sources) ──────────────────────────────────────────────────
-    images = _extract_all_images(html, name, json_ld)
+    # ── Images ────────────────────────────────────────────────────────────
+    images = _extract_product_images(html, name, json_ld)
 
     # ── Variants via ngsw cache ───────────────────────────────────────────────
     body = _extract_ngsw_product(html)
@@ -198,9 +206,7 @@ def fetch_solebox_product(product_url: str) -> dict:
             size_map = v.get('sizeMap', {})
             eu_raw   = size_map.get('sizeEu', {}).get('value', '')
 
-            # Format EU size label
             if not eu_raw or str(eu_raw).strip() in ('', 'null', 'None'):
-                # One-size or accessories with no numeric EU size
                 label = "One Size"
             else:
                 try:
@@ -229,11 +235,10 @@ def fetch_solebox_product(product_url: str) -> dict:
                 'ean':            ean,
             })
 
-        # Pricing from first variant
         if raw_variants:
             fp = raw_variants[0].get('price', {})
-            sale_price     = _cents_to_eur(fp.get('withTax'))          or sale_price
-            original_price = _cents_to_eur(fp.get('wasPriceNumeric'))  or sale_price
+            sale_price     = _cents_to_eur(fp.get('withTax'))         or sale_price
+            original_price = _cents_to_eur(fp.get('wasPriceNumeric')) or sale_price
 
     else:
         logger.warning("ngsw cache empty — falling back to JSON-LD price only, no per-size data")
