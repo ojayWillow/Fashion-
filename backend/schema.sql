@@ -105,7 +105,8 @@ CREATE INDEX IF NOT EXISTS idx_price_history_product ON price_history(product_id
 -- Seed stores
 INSERT OR IGNORE INTO stores (name, base_url, platform, shipping_cost, free_ship_min)
 VALUES
-    ('AFEW Store', 'https://en.afew-store.com', 'shopify', 7.99, 250.00),
-    ('END Clothing', 'https://www.endclothing.com', 'custom', 11.99, NULL),
-    ('SNS', 'https://www.sneakersnstuff.com', 'shopify', 0.00, NULL),
-    ('Naked Copenhagen', 'https://nakedcph.com', 'shopify', 15.00, 200.00);
+    ('AFEW Store',        'https://en.afew-store.com',      'shopify', 7.99,  250.00),
+    ('END Clothing',      'https://www.endclothing.com',    'custom',  11.99, NULL),
+    ('SNS',               'https://www.sneakersnstuff.com', 'shopify', 0.00,  NULL),
+    ('Naked Copenhagen',  'https://nakedcph.com',           'shopify', 15.00, 200.00),
+    ('Solebox',           'https://www.solebox.com',        'shopify', 5.99,  NULL);
