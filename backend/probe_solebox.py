@@ -1,4 +1,4 @@
-"""Find actual referenceKey format and the correct variants block."""
+"""Find the real product variants block (has stock + sizeMap)."""
 import re, json, sys
 sys.path.insert(0, '.')
 from curl_cffi import requests as cffi_requests
@@ -11,43 +11,36 @@ resp = session.get(URL, impersonate="chrome", timeout=20)
 html = resp.text
 print(f"HTML length: {len(html)}")
 
-# 1. Find ALL referenceKey values in the HTML
-print("\n--- All referenceKey values ---")
-for m in re.finditer(r'referenceKey[\\"]+:?[\\"]+([\w]+)', html):
-    print(f"  pos {m.start()}: {m.group(0)[:60]}")
-
-# 2. Show raw context around image ID 02549461
-print("\n--- Raw context around '02549461' (first 3 occurrences) ---")
-count = 0
-start = 0
-while count < 3:
-    idx = html.find('02549461', start)
-    if idx == -1:
-        break
-    print(f"  pos {idx}: ...{html[max(0,idx-30):idx+60]}...")
-    start = idx + 1
-    count += 1
-
-# 3. Find all 'variants':[{ blocks and show how many items each has
-print("\n--- All variants blocks (count of items) ---")
-for i, m in enumerate(re.finditer(r'\"variants\":\[\{', html)):
-    pos = m.start() + len('"variants":')
-    depth = 0
-    end = pos
-    for j, ch in enumerate(html[pos:pos+500000], start=pos):
-        if ch == '[': depth += 1
-        elif ch == ']':
-            depth -= 1
-            if depth == 0:
-                end = j + 1
-                break
-    try:
-        arr = json.loads(html[pos:end])
-        first_keys = list(arr[0].keys())[:6] if arr else []
-        ref = arr[0].get('referenceKey', 'N/A') if arr else 'N/A'
-        print(f"  Block {i} at {m.start()}: {len(arr)} items | keys: {first_keys} | referenceKey: {ref}")
-    except Exception as e:
-        print(f"  Block {i} at {m.start()}: parse error: {e}")
-    if i > 10:
-        print("  (stopping at 10)")
-        break
+# Find ALL 'variants' occurrences (not just '[{'), look for ones with 'sizeMap' nearby
+print("\n--- Searching for 'variants' with 'sizeMap' or 'stock' nearby ---")
+for m in re.finditer(r'\"variants\":', html):
+    pos = m.start()
+    chunk = html[pos:pos+300]
+    if 'sizeMap' in chunk or ('stock' in chunk and 'quantity' in chunk):
+        print(f"\nFound at pos {pos}:")
+        print(chunk[:300])
+        print("---")
+        # Try to parse the array
+        arr_start = pos + len('"variants":')
+        if html[arr_start] == '[':
+            depth = 0
+            end = arr_start
+            for i, ch in enumerate(html[arr_start:arr_start+2000000], start=arr_start):
+                if ch == '[': depth += 1
+                elif ch == ']':
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            try:
+                arr = json.loads(html[arr_start:end])
+                print(f"  -> Parsed {len(arr)} variants")
+                if arr:
+                    v0 = arr[0]
+                    print(f"  -> keys: {list(v0.keys())}")
+                    print(f"  -> stock: {v0.get('stock')}")
+                    print(f"  -> sizeMap: {v0.get('sizeMap')}")
+                    print(f"  -> price: {v0.get('price')}")
+                    print(f"  -> referenceKey: {v0.get('referenceKey')}")
+            except Exception as e:
+                print(f"  -> parse error: {e}")
