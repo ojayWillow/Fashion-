@@ -99,7 +99,7 @@
                     <input type="url" class="form-input" id="solebox-url" placeholder="https://www.solebox.com/en-eu/p/..." required>
                     <div class="form-hint">Paste any Solebox product page URL — use the EN-EU version for EUR prices</div>
                 </div>
-                <p class="auto-detect-note">🤖 Solebox runs on Shopify. Brand, sizes (converted to EU), images, and prices are all fetched automatically via the standard Shopify API.</p>
+                <p class="auto-detect-note">🤖 Solebox runs on Scayle. Brand, sizes (EU), images, stock, and prices are extracted automatically from the page cache.</p>
             </div>
             <button type="submit" class="submit-btn">Fetch & Add Product</button>
         </form>
@@ -316,10 +316,10 @@
             });
         });
 
-        // Solebox form (uses same Shopify endpoint)
+        // Solebox form
         document.getElementById('solebox-form').addEventListener('submit', async (e) => {
             e.preventDefault();
-            await submitProduct('/api/products/shopify', {
+            await submitProduct('/api/products/solebox', {
                 product_url: document.getElementById('solebox-url').value,
             });
         });
