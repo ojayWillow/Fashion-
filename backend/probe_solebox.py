@@ -1,42 +1,24 @@
-"""Extract auth tokens and full CONFIG blob from Solebox homepage."""
-import re
+"""Test the new referenceKey-based Solebox fetcher."""
+import logging
 import json
-import urllib.parse
-from curl_cffi import requests as r
+import sys
+sys.path.insert(0, '.')
 
-resp = r.get('https://www.solebox.com/en-eu/', impersonate='chrome', timeout=15)
-html = resp.text
-print(f"Status: {resp.status_code}, Length: {len(html)}")
+logging.basicConfig(level=logging.DEBUG, format='%(name)s %(levelname)s %(message)s')
 
-# Search for auth-related patterns
-print("\n--- Auth key patterns ---")
-for label, pattern in [
-    ('apiKey',       r'apiKey["\s]*[:=]["\s]*([\w\-]{10,60})'),
-    ('token',        r'["](token|accessToken|bearerToken)["\s]*:["\s]*([\w\-\.]{10,80})'),
-    ('x-api-key',   r'x-api-key["\s]*:["\s]*([\w\-]{10,60})'),
-    ('appId',        r'appId["\s]*:["\s]*([\w\-]{3,30})'),
-    ('resy',         r'resy["\s]*:["\s]*([\w\-]{3,30})'),
-    ('shopCountry',  r'shopCountry["\s]*:["\s]*([\w\-]{1,20})'),
-    ('channelId',    r'channelId["\s]*:["\s]*([\w\-]{1,20})'),
-]:
-    m = re.search(pattern, html, re.IGNORECASE)
-    if m:
-        print(f"  {label}: {m.group(0)[:100]}")
+from fetchers.solebox import fetch_solebox_product
 
-# Decode the full CONFIG blob
-print("\n--- Full CONFIG decoded ---")
-cfg_match = re.search(r'"CONFIG":"([^"]+)"', html)
-if cfg_match:
-    raw = cfg_match.group(1)
-    decoded = urllib.parse.unquote(raw)
-    try:
-        obj = json.loads(decoded)
-        print(json.dumps(obj, indent=2)[:3000])
-    except:
-        print(decoded[:3000])
-else:
-    print("CONFIG not found")
-    # Try alternate: window.__CONFIG
-    alt = re.search(r'window\.__CONFIG\s*=\s*(\{.*?\});', html, re.DOTALL)
-    if alt:
-        print(alt.group(1)[:2000])
+URL = "https://www.solebox.com/en-eu/p/nike-wmns-air-force-107-low-se-valentines-day-2026-light-pink-94471"
+
+result = fetch_solebox_product(URL)
+
+print("\n=== RESULT ===")
+print(f"Name:     {result['name']}")
+print(f"Brand:    {result['brand']}")
+print(f"Price:    €{result['sale_price']} (was €{result['original_price']})")
+print(f"In stock: {result['in_stock']}")
+print(f"Images:   {len(result['images'])}")
+print(f"Sizes ({len(result['sizes'])}) :")
+for s in result['sizes']:
+    status = 'IN STOCK' if s['in_stock'] else 'sold out'
+    print(f"  {s['label']:15} {status:10} id={s['variant_id']}")
