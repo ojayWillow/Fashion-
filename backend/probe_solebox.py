@@ -1,55 +1,53 @@
-"""Diagnose referenceKey anchor and variants extraction."""
-import re, json, time, sys
+"""Find actual referenceKey format and the correct variants block."""
+import re, json, sys
 sys.path.insert(0, '.')
 from curl_cffi import requests as cffi_requests
-from fetchers.solebox import _extract_image_id, _extract_variants_by_reference_key, _extract_variants_fallback
 
 URL = "https://www.solebox.com/en-eu/p/nike-wmns-air-force-107-low-se-valentines-day-2026-light-pink-94471"
 
-print("Fetching page...")
 session = cffi_requests.Session()
 session.get("https://www.solebox.com/en-eu/", impersonate="chrome", timeout=15)
 resp = session.get(URL, impersonate="chrome", timeout=20)
 html = resp.text
 print(f"HTML length: {len(html)}")
 
-# Step 1: get image_id from JSON-LD
-json_ld = None
-for m in re.finditer(r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL):
+# 1. Find ALL referenceKey values in the HTML
+print("\n--- All referenceKey values ---")
+for m in re.finditer(r'referenceKey[\\"]+:?[\\"]+([\w]+)', html):
+    print(f"  pos {m.start()}: {m.group(0)[:60]}")
+
+# 2. Show raw context around image ID 02549461
+print("\n--- Raw context around '02549461' (first 3 occurrences) ---")
+count = 0
+start = 0
+while count < 3:
+    idx = html.find('02549461', start)
+    if idx == -1:
+        break
+    print(f"  pos {idx}: ...{html[max(0,idx-30):idx+60]}...")
+    start = idx + 1
+    count += 1
+
+# 3. Find all 'variants':[{ blocks and show how many items each has
+print("\n--- All variants blocks (count of items) ---")
+for i, m in enumerate(re.finditer(r'\"variants\":\[\{', html)):
+    pos = m.start() + len('"variants":')
+    depth = 0
+    end = pos
+    for j, ch in enumerate(html[pos:pos+500000], start=pos):
+        if ch == '[': depth += 1
+        elif ch == ']':
+            depth -= 1
+            if depth == 0:
+                end = j + 1
+                break
     try:
-        d = json.loads(m.group(1).strip())
-        if d.get('@type') == 'Product':
-            json_ld = d
-            break
-    except: continue
-
-image_id = _extract_image_id(json_ld) if json_ld else None
-print(f"Image ID: {image_id}")
-
-# Step 2: check referenceKey anchor exists
-if image_id:
-    anchor = f'"referenceKey":"{image_id}'
-    idx = html.find(anchor)
-    print(f"referenceKey anchor at position: {idx}")
-    if idx != -1:
-        print(f"Context: {html[idx:idx+80]}")
-
-# Step 3: time the extraction
-print("\nExtracting variants (primary)...")
-t = time.time()
-variants = _extract_variants_by_reference_key(html, image_id) if image_id else None
-print(f"Primary extraction: {time.time()-t:.2f}s -> {len(variants) if variants else None} variants")
-
-if variants:
-    v = variants[0]
-    print(f"First variant keys: {list(v.keys())[:10]}")
-    print(f"referenceKey: {v.get('referenceKey')}")
-    print(f"stock: {v.get('stock')}")
-    print(f"sizeMap: {v.get('sizeMap')}")
-else:
-    print("\nTrying fallback...")
-    t = time.time()
-    variants = _extract_variants_fallback(html)
-    print(f"Fallback: {time.time()-t:.2f}s -> {len(variants) if variants else None} variants")
-    if variants:
-        print(f"First variant keys: {list(variants[0].keys())[:10]}")
+        arr = json.loads(html[pos:end])
+        first_keys = list(arr[0].keys())[:6] if arr else []
+        ref = arr[0].get('referenceKey', 'N/A') if arr else 'N/A'
+        print(f"  Block {i} at {m.start()}: {len(arr)} items | keys: {first_keys} | referenceKey: {ref}")
+    except Exception as e:
+        print(f"  Block {i} at {m.start()}: parse error: {e}")
+    if i > 10:
+        print("  (stopping at 10)")
+        break
