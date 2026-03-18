@@ -9,7 +9,7 @@ Data strategy:
   3. Parse and normalise into the standard product dict
 
 Price structure (Scayle):
-  - price.withTax        = current price in cents (e.g. 12999 = €129.99)
+  - price.withTax        = current price in cents (e.g. 12999 = 129.99)
   - price.wasPriceNumeric = original price in cents when on sale
   - stock.quantity > 0   = in stock
   - sizeMap.sizeEu       = EU size label
@@ -55,11 +55,7 @@ def _cents_to_eur(cents) -> float | None:
 
 
 def _extract_ngsw_product(html: str) -> dict | None:
-    """Extract the products/{id} blob from the ngsw service-worker cache in HTML.
-
-    The Angular app embeds serialised HTTP responses URL-encoded into the HTML.
-    We find the blob matching '/v1/products/' and decode its 'body' field.
-    """
+    """Extract the products/{id} blob from the ngsw service-worker cache in HTML."""
     for m in re.finditer(r'api\.solebox\.com[^"\s]{20,}', html):
         decoded = unquote(m.group())
         if '/v1/products/' not in decoded:
@@ -88,6 +84,59 @@ def _extract_ngsw_product(html: str) -> dict | None:
     return None
 
 
+def _extract_all_images(html: str, name: str, json_ld: dict) -> list:
+    """Extract all product images from multiple sources, deduplicating by URL."""
+    seen = set()
+    images = []
+
+    def add(url, alt=""):
+        # Normalise: strip query strings for dedup but keep original URL
+        base = url.split('?')[0]
+        if base not in seen and url not in seen:
+            seen.add(base)
+            seen.add(url)
+            images.append({"url": url, "alt": alt or name})
+
+    # 1. JSON-LD image field (may be str or list)
+    ld_image = json_ld.get("image", "")
+    if isinstance(ld_image, str) and ld_image:
+        add(ld_image)
+    elif isinstance(ld_image, list):
+        for img in ld_image:
+            url = img if isinstance(img, str) else img.get("url", "")
+            if url:
+                add(url)
+
+    # 2. og:image meta tags
+    for url in re.findall(r'<meta[^>]+property="og:image"[^>]+content="([^"]+)"', html):
+        add(url)
+    for url in re.findall(r'<meta[^>]+content="([^"]+)"[^>]+property="og:image"', html):
+        add(url)
+
+    # 3. Scayle/ngsw product images embedded in the serialised cache blob
+    # These appear as CDN image URLs ending in common image extensions
+    cdn_pattern = re.compile(
+        r'https://cdn\.scayle\.com/[^"\s\\]+\.(?:jpg|jpeg|png|webp)(?:\?[^"\s\\]*)?',
+        re.IGNORECASE,
+    )
+    for url in cdn_pattern.findall(html):
+        # Skip tiny thumbnails (width < 200 in URL params) and swatch images
+        if 'width=1' in url or 'width=5' in url or 'width=6' in url or 'width=7' in url or 'width=8' in url or 'width=9' in url:
+            continue
+        add(url)
+
+    # 4. Any media.solebox.com or images.solebox.com URLs
+    solebox_img = re.compile(
+        r'https://(?:media|images)\.solebox\.com/[^"\s\\]+\.(?:jpg|jpeg|png|webp)(?:\?[^"\s\\]*)?',
+        re.IGNORECASE,
+    )
+    for url in solebox_img.findall(html):
+        add(url)
+
+    logger.info(f"Collected {len(images)} unique images")
+    return images
+
+
 def fetch_solebox_product(product_url: str) -> dict:
     """Fetch and parse a Solebox product page."""
     parsed = urlparse(product_url)
@@ -104,7 +153,7 @@ def fetch_solebox_product(product_url: str) -> dict:
     resp.raise_for_status()
     html = resp.text
 
-    # ── JSON-LD for name, brand, color, images ────────────────────────────────
+    # ── JSON-LD for name, brand, color, description ───────────────────────────
     json_ld = None
     for match in re.finditer(r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL):
         try:
@@ -118,30 +167,18 @@ def fetch_solebox_product(product_url: str) -> dict:
     if not json_ld:
         raise ValueError("Could not find Product JSON-LD on page")
 
-    name  = json_ld.get("name", "Unknown Product")
-    brand = json_ld.get("brand", {}).get("name", "Unknown Brand").strip()
-    color = json_ld.get("color", "")
-    product_id = json_ld.get("productId")
+    name        = json_ld.get("name", "Unknown Product")
+    brand       = json_ld.get("brand", {}).get("name", "Unknown Brand").strip()
+    color       = json_ld.get("color", "")
+    product_id  = json_ld.get("productId")
+    description = json_ld.get("description", "").strip()
 
-    offers = json_ld.get("offers", {})
+    offers       = json_ld.get("offers", {})
     ld_price     = offers.get("price")
     ld_available = offers.get("availability", "") == "https://schema.org/InStock"
 
-    # ── Images ────────────────────────────────────────────────────────────────
-    images = []
-    ld_image = json_ld.get("image", "")
-    if isinstance(ld_image, str) and ld_image:
-        images.append({"url": ld_image, "alt": name})
-    elif isinstance(ld_image, list):
-        for img in ld_image:
-            url = img if isinstance(img, str) else img.get("url", "")
-            if url:
-                images.append({"url": url, "alt": name})
-    seen = {i["url"] for i in images}
-    for url in re.findall(r'<meta property="og:image" content="([^"]+)"', html):
-        if url not in seen:
-            images.append({"url": url, "alt": name})
-            seen.add(url)
+    # ── Images (all sources) ──────────────────────────────────────────────────
+    images = _extract_all_images(html, name, json_ld)
 
     # ── Variants via ngsw cache ───────────────────────────────────────────────
     body = _extract_ngsw_product(html)
@@ -162,21 +199,25 @@ def fetch_solebox_product(product_url: str) -> dict:
             eu_raw   = size_map.get('sizeEu', {}).get('value', '')
 
             # Format EU size label
-            try:
-                eu_val   = float(eu_raw)
-                frac     = eu_val - int(eu_val)
-                if frac == 0:
-                    label = f"EU {int(eu_val)}"
-                elif abs(frac - 0.5) < 0.01:
-                    label = f"EU {int(eu_val)}.5"
-                elif abs(frac - 0.333) < 0.01:
-                    label = f"EU {int(eu_val)} 1/3"
-                elif abs(frac - 0.667) < 0.01:
-                    label = f"EU {int(eu_val)} 2/3"
-                else:
+            if not eu_raw or str(eu_raw).strip() in ('', 'null', 'None'):
+                # One-size or accessories with no numeric EU size
+                label = "One Size"
+            else:
+                try:
+                    eu_val = float(eu_raw)
+                    frac   = eu_val - int(eu_val)
+                    if frac == 0:
+                        label = f"EU {int(eu_val)}"
+                    elif abs(frac - 0.5) < 0.01:
+                        label = f"EU {int(eu_val)}.5"
+                    elif abs(frac - 0.333) < 0.01:
+                        label = f"EU {int(eu_val)} 1/3"
+                    elif abs(frac - 0.667) < 0.01:
+                        label = f"EU {int(eu_val)} 2/3"
+                    else:
+                        label = f"EU {eu_raw}"
+                except (ValueError, TypeError):
                     label = f"EU {eu_raw}"
-            except (ValueError, TypeError):
-                label = f"EU {eu_raw}" if eu_raw else "?"
 
             ean = v.get('attributes', {}).get('ean', {}).get('values', {}).get('value', '')
 
@@ -191,8 +232,8 @@ def fetch_solebox_product(product_url: str) -> dict:
         # Pricing from first variant
         if raw_variants:
             fp = raw_variants[0].get('price', {})
-            sale_price     = _cents_to_eur(fp.get('withTax'))     or sale_price
-            original_price = _cents_to_eur(fp.get('wasPriceNumeric')) or sale_price
+            sale_price     = _cents_to_eur(fp.get('withTax'))          or sale_price
+            original_price = _cents_to_eur(fp.get('wasPriceNumeric'))  or sale_price
 
     else:
         logger.warning("ngsw cache empty — falling back to JSON-LD price only, no per-size data")
@@ -204,8 +245,8 @@ def fetch_solebox_product(product_url: str) -> dict:
     if original_price is None:
         original_price = sale_price
 
-    discount_pct  = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
-    any_in_stock  = any(s['in_stock'] for s in sizes) if sizes else ld_available
+    discount_pct   = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
+    any_in_stock   = any(s['in_stock'] for s in sizes) if sizes else ld_available
     in_stock_count = sum(1 for s in sizes if s['in_stock'])
     logger.info(f"Sizes: {in_stock_count}/{len(sizes)} in stock")
 
@@ -224,7 +265,7 @@ def fetch_solebox_product(product_url: str) -> dict:
         'original_price': original_price,
         'sale_price':     sale_price,
         'discount_pct':   discount_pct,
-        'description':    '',
+        'description':    description,
         'product_url':    product_url,
         'images':         images,
         'sizes':          sizes,
@@ -254,7 +295,6 @@ def check_product_still_online(product_url: str) -> dict:
                 'sizes_total':     len(variants),
             }
 
-        # fallback: JSON-LD availability
         avail = re.search(r'"availability":\s*"https://schema\.org/(InStock|OutOfStock)"', html)
         in_stock = avail.group(1) == 'InStock' if avail else True
         return {'online': True, 'in_stock': in_stock, 'sizes_available': 0, 'sizes_total': 0}
