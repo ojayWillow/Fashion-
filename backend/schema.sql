@@ -78,6 +78,17 @@ CREATE TABLE IF NOT EXISTS stock_checks (
     raw_response    TEXT
 );
 
+-- Price history: one row per price change detected during stock checks
+CREATE TABLE IF NOT EXISTS price_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id      INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    old_price       REAL NOT NULL,
+    new_price       REAL NOT NULL,
+    old_discount    INTEGER NOT NULL,
+    new_discount    INTEGER NOT NULL,
+    changed_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_products_store ON products(store_id);
 CREATE INDEX IF NOT EXISTS idx_products_brand ON products(brand);
@@ -89,6 +100,7 @@ CREATE INDEX IF NOT EXISTS idx_product_sizes_product ON product_sizes(product_id
 CREATE INDEX IF NOT EXISTS idx_product_sizes_label ON product_sizes(size_label);
 CREATE INDEX IF NOT EXISTS idx_product_images_product ON product_images(product_id);
 CREATE INDEX IF NOT EXISTS idx_stock_checks_product ON stock_checks(product_id);
+CREATE INDEX IF NOT EXISTS idx_price_history_product ON price_history(product_id);
 
 -- Seed stores
 INSERT OR IGNORE INTO stores (name, base_url, platform, shipping_cost, free_ship_min)
