@@ -9,6 +9,10 @@ Requires 3 consecutive failures before marking unavailable.
 Price tracking: live price is scraped on every check. If it differs from
 the stored sale_price, the DB is updated and a row is written to price_history.
 
+Naked Copenhagen NOTE: nakedcph.com blocks the Shopify .js endpoint.
+Stock is checked via HTML scraping (fetchers/naked.py). Prices are stored
+in DKK→EUR converted form and must NOT be overwritten from the .js endpoint.
+
 Run directly: python stock_checker.py
 Or import run_stock_check() — auto-scheduled via APScheduler in app.py.
 """
@@ -35,6 +39,14 @@ MAX_FAIL_COUNT = 3
 CHECK_DELAY = 1.0
 
 REMOVAL_LOG = Path(__file__).resolve().parent.parent / "data" / "removed_products.csv"
+
+# Domains that block the standard Shopify .js endpoint.
+# These stores are checked via HTML scraping — their prices must NOT be
+# overwritten from the .js endpoint (which may be blocked or return wrong currency).
+SHOPIFY_HTML_ONLY_DOMAINS = {
+    "nakedcph.com",
+    "www.nakedcph.com",
+}
 
 
 # ── Removal audit log ────────────────────────────────────────────
@@ -71,24 +83,60 @@ def read_removal_log() -> list[dict]:
 # ── Standardized result format ────────────────────────────────────
 #
 #   {
-#       "success": True/False,       — did the check itself work?
-#       "online": True/False/None,   — is the product page still live? (None = unknown)
-#       "any_in_stock": True/False,  — is anything available?
-#       "sizes_available": int,      — how many sizes in stock
-#       "sizes": [...],              — per-size details (optional)
-#       "live_price": float or None, — current sale price from the store
+#       "success": True/False,          — did the check itself work?
+#       "online": True/False/None,      — is the product page still live? (None = unknown)
+#       "any_in_stock": True/False,     — is anything available?
+#       "sizes_available": int,         — how many sizes in stock
+#       "sizes": [...],                 — per-size details (optional)
+#       "live_price": float or None,    — current sale price from the store (None = don't update)
 #       "live_original": float or None, — current compare-at / original price
-#       "error": str or None,        — error message if success=False
+#       "error": str or None,           — error message if success=False
 #   }
 
 
-# ── Shopify stock check (SNS, AFEW, Naked CPH etc.) ──────────────
+# ── Naked Copenhagen stock check (HTML scraping) ─────────────────
+
+def check_naked_stock(product_url: str) -> dict:
+    """Check stock for Naked Copenhagen via HTML scraping.
+
+    nakedcph.com blocks the Shopify .js endpoint, so we scrape the HTML page.
+    Prices are intentionally NOT returned here — they are stored in EUR
+    (converted from DKK at fetch time) and must not be overwritten by this check.
+    """
+    try:
+        from fetchers.naked import check_product_still_online
+        result = check_product_still_online(product_url)
+        return {
+            "success": True,
+            "online": result.get("online", True),
+            "any_in_stock": result.get("in_stock", False),
+            "sizes_available": result.get("sizes_available", 0),
+            "sizes": [],          # naked checker doesn't return per-size variant IDs
+            "live_price": None,   # never overwrite — price stored in EUR already
+            "live_original": None,
+            "error": None,
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "online": None,
+            "any_in_stock": None,
+            "sizes_available": 0,
+            "sizes": [],
+            "live_price": None,
+            "live_original": None,
+            "error": str(e),
+        }
+
+
+# ── Shopify stock check (SNS, AFEW etc.) ────────────────────────
 
 def check_shopify_stock(product_url: str, handle: str) -> dict:
     """Check stock and live price for a Shopify product via .js endpoint.
 
     The Shopify .js endpoint returns price / compare_at_price in cents.
     Uses shared retry logic to handle rate limits and transient errors.
+    Only called for stores that support the .js endpoint (not Naked CPH).
     """
     base = product_url.split("/products/")[0]
     js_url = f"{base}/products/{handle}.js"
@@ -119,7 +167,7 @@ def check_shopify_stock(product_url: str, handle: str) -> dict:
                 "variant_id": str(v["id"]),
             })
 
-        # Shopify returns prices in cents — convert to euros/pounds
+        # Shopify returns prices in cents — convert to euros
         price_cents = data.get("price")
         compare_cents = data.get("compare_at_price")
         live_price = round(price_cents / 100, 2) if price_cents else None
@@ -158,7 +206,6 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
     Returns per-size stock status and current price.
     """
     if not sku:
-        # Try to extract SKU from URL
         import re
         from urllib.parse import urlparse as _urlparse
         slug = _urlparse(product_url).path.rstrip("/").split("/")[-1].replace(".html", "")
@@ -215,7 +262,6 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
 
         hits = resp.json().get("hits", [])
 
-        # Find exact SKU match
         hit = None
         for h in hits:
             if h.get("sku", "").upper() == sku.upper():
@@ -225,7 +271,6 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
             hit = hits[0]
 
         if not hit:
-            # Product not found in Algolia — might be removed
             return {
                 "success": True,
                 "online": False,
@@ -237,7 +282,6 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
                 "error": None,
             }
 
-        # Parse sizes from Algolia hit
         labels = hit.get("footwear_size_label") or hit.get("size") or []
         sku_stock = hit.get("sku_stock", {})
         stock_entries = sorted(sku_stock.items(), key=lambda x: x[0])
@@ -266,7 +310,6 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
         total_stock = hit.get("stock", 0)
         any_available = total_stock > 0 if total_stock is not None else any(s["in_stock"] for s in sizes)
 
-        # Extract live price from Algolia hit
         live_price = hit.get("sale_price") or hit.get("price")
         live_original = hit.get("original_price") or hit.get("compare_at_price")
 
@@ -298,7 +341,12 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
 
 def check_product_stock(platform: str, product_url: str, slug: str, sku: str | None) -> dict:
     """Route stock check to the correct store-specific function."""
+    domain = urlparse(product_url).netloc
+
     if platform == "shopify":
+        # Naked CPH blocks .js — use HTML scraper, never overwrite price
+        if domain in SHOPIFY_HTML_ONLY_DOMAINS:
+            return check_naked_stock(product_url)
         handle = product_url.rstrip("/").split("/products/")[-1].split("?")[0]
         return check_shopify_stock(product_url, handle)
 
@@ -342,7 +390,6 @@ def _check_domain_batch(products_for_domain: list[dict]) -> list[tuple[dict, dic
         result = check_product_stock(p["platform"], p["product_url"], p["slug"], p["sku"])
         result["_skipped"] = False
 
-        # Detect dead domain from DNS/timeout errors
         if not result["success"] and result.get("error"):
             err = result["error"]
             if "NameResolution" in err or "timed out" in err or "ConnectTimeout" in err:
@@ -371,49 +418,40 @@ def _apply_price_update(
 
     Logs a row to price_history on every change.
     """
-    price_changed = round(live_price, 2) != round(old_sale, 2)
-
-    # Use live_original if available, otherwise keep existing original_price
-    new_original = round(live_original, 2) if live_original else round(old_original, 2)
     new_sale = round(live_price, 2)
+    new_original = round(live_original, 2) if live_original else round(old_original, 2)
 
-    # Recalculate discount percentage
-    if new_original and new_original > new_sale:
-        new_discount = round((1 - new_sale / new_original) * 100)
-    elif new_original and new_original == new_sale:
-        new_discount = 0
-    else:
-        # Can't compute discount (no original price or sale > original)
-        new_discount = 0
+    if round(old_sale, 2) == new_sale:
+        return  # No change, nothing to do
 
-    if price_changed:
-        old_discount = round((1 - round(old_sale, 2) / round(old_original, 2)) * 100) if old_original else 0
+    old_discount = round((1 - round(old_sale, 2) / round(old_original, 2)) * 100) if old_original else 0
+    new_discount = round((1 - new_sale / new_original) * 100) if new_original > new_sale else 0
 
-        conn.execute(
-            """UPDATE products
-            SET sale_price = ?, original_price = ?, discount_pct = ?,
-                updated_at = ?
-            WHERE id = ?""",
-            (new_sale, new_original, new_discount, now, product_id),
-        )
-        conn.execute(
-            """INSERT INTO price_history
-            (product_id, old_price, new_price, old_discount, new_discount, changed_at)
-            VALUES (?, ?, ?, ?, ?, ?)""",
-            (product_id, round(old_sale, 2), new_sale, old_discount, new_discount, now),
-        )
-        logger.info(
-            f"  {slug}: price updated €{old_sale:.2f} → €{new_sale:.2f} "
-            f"(discount {old_discount}% → {new_discount}%)"
-        )
+    conn.execute(
+        """UPDATE products
+        SET sale_price = ?, original_price = ?, discount_pct = ?, updated_at = ?
+        WHERE id = ?""",
+        (new_sale, new_original, new_discount, now, product_id),
+    )
+    conn.execute(
+        """INSERT INTO price_history
+        (product_id, old_price, new_price, old_discount, new_discount, changed_at)
+        VALUES (?, ?, ?, ?, ?, ?)""",
+        (product_id, round(old_sale, 2), new_sale, old_discount, new_discount, now),
+    )
+    logger.info(
+        f"  {slug}: price updated €{old_sale:.2f} → €{new_sale:.2f} "
+        f"(discount {old_discount}% → {new_discount}%)"
+    )
 
 
 # ── Main stock check loop ────────────────────────────────────────
 
 def run_stock_check():
-    """Check all products, update stock status, and sync live prices.
+    """Check all active products, update stock status, and sync live prices.
 
     Safety rules:
+    - Only checks products with status != 'removed' (prevents infinite removal loop)
     - Failed checks (network errors, timeouts) do NOT change product status or price
     - Network errors do NOT increment fail_count (prevents false removals)
     - Products need 3 consecutive "confirmed gone" results before removal
@@ -424,20 +462,22 @@ def run_stock_check():
     Price tracking:
     - live_price from each check is compared to stored sale_price
     - Any change updates sale_price, recalculates discount_pct, and writes to price_history
+    - Naked CPH prices are never touched (live_price=None returned by checker)
     """
     global last_run, last_result
 
     conn = get_db()
     now = datetime.now(timezone.utc).isoformat()
 
+    # Only check active products — skip anything already confirmed removed
     products = conn.execute(
         """SELECT p.id, p.slug, p.product_url, p.sku, p.in_stock,
                   p.fail_count, p.sale_price, p.original_price, s.platform
         FROM products p
-        JOIN stores s ON p.store_id = s.id"""
+        JOIN stores s ON p.store_id = s.id
+        WHERE p.status != 'removed'"""
     ).fetchall()
 
-    # Convert rows to dicts for thread safety
     products = [dict(p) for p in products]
 
     total = len(products)
@@ -448,7 +488,7 @@ def run_stock_check():
     marked_offline = 0
     price_updates = 0
 
-    logger.info(f"Stock check started — {total} products")
+    logger.info(f"Stock check started — {total} active products")
 
     # Group products by store domain
     domain_groups: dict[str, list[dict]] = {}
@@ -470,12 +510,10 @@ def run_stock_check():
             except Exception as e:
                 logger.error(f"  Domain batch failed for {domain}: {e}")
 
-    # Process all results in main thread (sqlite is not thread-safe)
     for p, result in all_results:
         product_id = p["id"]
         current_fail_count = p["fail_count"] or 0
 
-        # Skipped products — domain was down, don't touch anything
         if result.get("_skipped"):
             skipped += 1
             logger.info(f"  {p['slug']}: SKIPPED (domain down)")
@@ -484,13 +522,10 @@ def run_stock_check():
         checked += 1
 
         if result["success"]:
-            # ✅ Check succeeded
             if result["online"] is False:
-                # Product confirmed gone from store — increment fail_count
                 new_fail_count = current_fail_count + 1
 
                 if new_fail_count >= MAX_FAIL_COUNT:
-                    # Confirmed offline after multiple checks
                     conn.execute(
                         """UPDATE products
                         SET in_stock = 0, status = 'removed',
@@ -508,7 +543,6 @@ def run_stock_check():
                     )
                     logger.warning(f"  {p['slug']}: REMOVED (confirmed after {new_fail_count} checks)")
                 else:
-                    # Not yet confirmed — increment but don't change stock
                     conn.execute(
                         """UPDATE products
                         SET fail_count = ?, last_checked = ?, updated_at = ?
@@ -517,7 +551,6 @@ def run_stock_check():
                     )
                     logger.info(f"  {p['slug']}: not found ({new_fail_count}/{MAX_FAIL_COUNT} strikes)")
             else:
-                # Product is online — update stock status and reset fail counter
                 in_stock = 1 if result["any_in_stock"] else 0
                 conn.execute(
                     """UPDATE products
@@ -527,7 +560,6 @@ def run_stock_check():
                     (in_stock, now, now, product_id),
                 )
 
-                # Update per-size stock
                 for size in result.get("sizes", []):
                     in_stock_val = 1 if size["in_stock"] else 0
                     if size.get("variant_id"):
@@ -545,11 +577,10 @@ def run_stock_check():
                             (in_stock_val, now, product_id, size["label"]),
                         )
 
-                # ── Live price sync ──────────────────────────────
+                # Live price sync — only if checker returned a price (Naked CPH returns None)
                 live_price = result.get("live_price")
                 live_original = result.get("live_original")
                 if live_price and live_price > 0:
-                    before_count = price_updates
                     _apply_price_update(
                         conn=conn,
                         product_id=product_id,
@@ -560,8 +591,6 @@ def run_stock_check():
                         live_original=live_original,
                         now=now,
                     )
-                    # Check if the function logged a change (hack: re-query isn't needed,
-                    # we detect by comparing prices directly)
                     if round(live_price, 2) != round(p["sale_price"], 2):
                         price_updates += 1
 
@@ -570,18 +599,13 @@ def run_stock_check():
                 updated += 1
 
         else:
-            # ❌ Network error — do NOT increment fail_count or touch price
-            # Only update last_checked so we know we tried
             conn.execute(
                 "UPDATE products SET last_checked = ? WHERE id = ?",
                 (now, product_id),
             )
             failed += 1
-            logger.error(
-                f"  {p['slug']}: CHECK FAILED (network) — {result['error']}"
-            )
+            logger.error(f"  {p['slug']}: CHECK FAILED (network) — {result['error']}")
 
-        # Log to stock_checks table
         conn.execute(
             """INSERT INTO stock_checks
             (product_id, was_in_stock, sizes_available, raw_response)
