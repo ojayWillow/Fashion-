@@ -44,6 +44,23 @@ def init_db():
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE products ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0")
         print("[FASHION-] Added 'fail_count' column to products table")
+    # Create price_history table if it doesn't exist yet (added for live price tracking)
+    try:
+        conn.execute("SELECT id FROM price_history LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS price_history (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id      INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+                old_price       REAL NOT NULL,
+                new_price       REAL NOT NULL,
+                old_discount    INTEGER NOT NULL,
+                new_discount    INTEGER NOT NULL,
+                changed_at      TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_price_history_product ON price_history(product_id);
+        """)
+        print("[FASHION-] Created 'price_history' table")
     # Fix END Clothing shipping cost if it was seeded with old value
     conn.execute(
         "UPDATE stores SET shipping_cost = 11.99 WHERE base_url = 'https://www.endclothing.com' AND shipping_cost != 11.99"
@@ -68,7 +85,7 @@ def insert_product(conn: sqlite3.Connection, product: dict) -> int:
             product["name"],
             product["brand"],
             product["slug"],
-            product.get("sku"),
+            product["sku"],
             product.get("colorway"),
             product.get("category", "sneakers"),
             product["original_price"],
