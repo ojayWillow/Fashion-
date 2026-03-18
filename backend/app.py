@@ -81,7 +81,7 @@ def login(request: Request, response: Response, body: dict):
         max_age=SESSION_MAX_AGE,
         httponly=True,
         samesite="lax",
-        secure=False,  # Set to True in production with HTTPS
+        secure=False,
     )
     return {"message": "Logged in"}
 
@@ -307,8 +307,8 @@ def add_solebox_product(input: SoleboxFetchInput, request: Request):
         raise HTTPException(status_code=400, detail=f"Failed to fetch product: {e}")
 
     conn = get_db()
-    store = get_store_by_platform(conn, "solebox.com")
-    product_data["store_id"] = store["id"] if store else None
+    store = get_store_by_platform(conn, "https://www.solebox.com")
+    product_data["store_id"] = store["id"] if store else 5  # fallback: Solebox is store #5
 
     if input.category_override:
         product_data["category"] = input.category_override
