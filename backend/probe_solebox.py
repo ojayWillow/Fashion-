@@ -1,38 +1,47 @@
-"""Test the real Solebox API endpoints (double /v1/v1/ path)."""
-import json, sys
+"""Extract Charybdis required headers from main.js bootstrap code."""
+import re, json, sys
 sys.path.insert(0, '.')
 from curl_cffi import requests as cffi_requests
 
-BASE = "https://api.solebox.com/sni-pl-prd-stor-we-char/v1"
-
-# Warm session to get Cloudflare cookies
 session = cffi_requests.Session()
 session.get("https://www.solebox.com/en-eu/", impersonate="chrome", timeout=15)
 
-h = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json",
-    "Referer": "https://www.solebox.com/",
-    "x-shop-id": "1039",
-    "x-locale": "en_EU",
-    "x-country": "GB",
-}
+print("=== Fetching main.js ===")
+resp = session.get("https://www.solebox.com/main.js", impersonate="chrome", timeout=20)
+js = resp.text
+print(f"main.js length: {len(js)}")
 
-tests = [
-    "/v1/base",
-    "/v1/products/94471",
-    "/v1/products/94471?with=variants,stock,attributes,images,priceRange",
-    "/v1/pages/productDetails?pageType=productDetailPage&slug=nike-wmns-air-force-107-low-se-valentines-day-2026-light-pink-94471",
-    "/v1/products?where[slug]=nike-wmns-air-force-107-low-se-valentines-day-2026-light-pink-94471&with=variants,stock",
-]
+# Find charybdis/header config blocks
+for pattern, label in [
+    (r'charybdis[^}]{0,50}headers[^}]{0,200}', 'headers near charybdis'),
+    (r'x-request-token[^,;"]{0,100}', 'x-request-token'),
+    (r'x-api-key[^,;"]{0,100}', 'x-api-key'),
+    (r'x-shop-id[^,;"]{0,100}', 'x-shop-id'),
+    (r'Authorization[^,;"]{0,100}', 'Authorization'),
+    (r'Bearer [A-Za-z0-9._\-]{10,80}', 'Bearer token'),
+    (r'generateToken[^}]{0,200}', 'generateToken'),
+    (r'shopKey[^,;"]{0,100}', 'shopKey'),
+    (r'apiToken[^,;"]{0,100}', 'apiToken'),
+    (r'SCAYLE_[A-Z_]+[^,;"]{0,80}', 'SCAYLE env vars'),
+    (r'"token":\s*"[A-Za-z0-9._\-]{10,80}"', 'hardcoded token'),
+    (r'country_id[^,;"]{0,100}', 'country_id'),
+]:
+    matches = re.findall(pattern, js, re.IGNORECASE)
+    if matches:
+        print(f"\n--- {label} ---")
+        for m in matches[:3]:
+            print(f"  {m[:200]}")
 
-for path in tests:
-    url = BASE + path
-    resp = session.get(url, headers=h, impersonate="chrome", timeout=10)
-    print(f"\n{resp.status_code} | {path}")
-    text = resp.text[:600]
-    try:
-        obj = json.loads(resp.text)
-        print(json.dumps(obj, indent=2)[:600])
-    except:
-        print(text)
+# Also find the ngsw-state key in the HTML (sometimes contains bootstrap token)
+resp2 = session.get("https://www.solebox.com/en-eu/", impersonate="chrome", timeout=15)
+html = resp2.text
+for pattern, label in [
+    (r'ngsw[^"]{0,30}token[^"]{0,80}', 'ngsw token'),
+    (r'__SCAYLE[^<]{0,200}', 'SCAYLE state'),
+    (r'window\.__[A-Z]{3,}[^<]{0,200}', 'window globals'),
+]:
+    matches = re.findall(pattern, html, re.IGNORECASE)
+    if matches:
+        print(f"\n--- HTML: {label} ---")
+        for m in matches[:3]:
+            print(f"  {m[:200]}")
