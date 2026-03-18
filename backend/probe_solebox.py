@@ -1,46 +1,38 @@
-"""Find the async API routes Solebox uses for product/variant data."""
-import re, json, sys
+"""Test the real Solebox API endpoints (double /v1/v1/ path)."""
+import json, sys
 sys.path.insert(0, '.')
 from curl_cffi import requests as cffi_requests
 
+BASE = "https://api.solebox.com/sni-pl-prd-stor-we-char/v1"
+
+# Warm session to get Cloudflare cookies
 session = cffi_requests.Session()
 session.get("https://www.solebox.com/en-eu/", impersonate="chrome", timeout=15)
 
-# 1. Fetch ngsw.json - this lists all URLs the service worker caches
-print("=== ngsw.json ===")
-resp = session.get("https://www.solebox.com/en-eu/ngsw.json", impersonate="chrome", timeout=15)
-ngsw = resp.json()
-# Print all URL groups
-for group in ngsw.get('dataGroups', []):
-    print(f"\nData group: {group.get('name')} | strategy: {group.get('cacheConfig', {}).get('strategy')}")
-    for url in group.get('urls', [])[:5]:
-        print(f"  {url}")
-for group in ngsw.get('assetGroups', []):
-    print(f"\nAsset group: {group.get('name')}")
-    for url in list(group.get('urls', []))[:3]:
-        print(f"  {url}")
+h = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Accept": "application/json",
+    "Referer": "https://www.solebox.com/",
+    "x-shop-id": "1039",
+    "x-locale": "en_EU",
+    "x-country": "GB",
+}
 
-# 2. Fetch the product page and find any XHR/fetch URLs in the JS
-print("\n=== Scanning page JS for API endpoint patterns ===")
-resp2 = session.get(
-    "https://www.solebox.com/en-eu/p/nike-wmns-air-force-107-low-se-valentines-day-2026-light-pink-94471",
-    impersonate="chrome", timeout=20
-)
-html = resp2.text
+tests = [
+    "/v1/base",
+    "/v1/products/94471",
+    "/v1/products/94471?with=variants,stock,attributes,images,priceRange",
+    "/v1/pages/productDetails?pageType=productDetailPage&slug=nike-wmns-air-force-107-low-se-valentines-day-2026-light-pink-94471",
+    "/v1/products?where[slug]=nike-wmns-air-force-107-low-se-valentines-day-2026-light-pink-94471&with=variants,stock",
+]
 
-# Find all script src URLs
-scripts = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html)
-print(f"Script tags: {len(scripts)}")
-for s in scripts[:10]:
-    print(f"  {s}")
-
-# Look for charybdis/backbone/api patterns directly in HTML
-for pattern in [
-    r'charybdis[^"\s]{5,80}',
-    r'backbone-api[^"\s]{5,80}',
-    r'/v1/[^"\s]{5,60}',
-    r'api\.solebox[^"\s]{5,60}',
-]:
-    matches = re.findall(pattern, html)
-    if matches:
-        print(f"\nPattern '{pattern[:30]}': {matches[:5]}")
+for path in tests:
+    url = BASE + path
+    resp = session.get(url, headers=h, impersonate="chrome", timeout=10)
+    print(f"\n{resp.status_code} | {path}")
+    text = resp.text[:600]
+    try:
+        obj = json.loads(resp.text)
+        print(json.dumps(obj, indent=2)[:600])
+    except:
+        print(text)
