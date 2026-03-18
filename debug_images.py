@@ -1,6 +1,6 @@
 from curl_cffi import requests as cffi_requests
 import re
-from urllib.parse import unquote
+import json
 
 URL = "https://www.solebox.com/en-eu/p/47-nhl-anaheim-ducks-clean-up-cap-black-85706"
 
@@ -13,30 +13,31 @@ r = cffi_requests.get(
 html = r.text
 print(f"Page size: {len(html)} chars")
 
-pattern = re.compile(r'https://[^"\s\\]+\.(?:jpg|jpeg|png|webp)[^"\s\\]*', re.IGNORECASE)
-all_urls = pattern.findall(html)
+# --- Search for description text ---
+print("\n=== DESCRIPTION CANDIDATES ===")
+for m in re.finditer(r'["\']description["\']\s*:\s*["\']([^\'"]{20,500})', html):
+    print(repr(m.group(1)[:200]))
+    print("---")
 
-seen = set()
-unique = []
-for u in all_urls:
-    base = u.split("?")[0]
-    if base not in seen:
-        seen.add(base)
-        unique.append(u)
-
-print(f"\n--- {len(unique)} unique image URLs ---")
-for u in unique:
-    print(u[:150])
-
-# Also check what JSON-LD contains
-import json
-for m in re.finditer(r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL):
+# Also check all JSON-LD blocks
+print("\n=== ALL JSON-LD BLOCKS ===")
+for i, m in enumerate(re.finditer(r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL)):
     try:
         data = json.loads(m.group(1).strip())
-        if data.get("@type") == "Product":
-            print("\n--- JSON-LD image field ---")
-            print(json.dumps(data.get("image"), indent=2))
-            print("\n--- JSON-LD description ---")
-            print(data.get("description", "(none)"))
-    except:
-        pass
+        print(f"Block {i}: @type={data.get('@type')}")
+        if 'description' in data:
+            print(f"  description: {repr(data['description'][:300])}")
+        if data.get('@type') == 'Product':
+            print(json.dumps(data, indent=2)[:800])
+    except Exception as e:
+        print(f"Block {i}: parse error {e}")
+    print("---")
+
+# Check for shortDescription or longDescription keys
+print("\n=== SHORT/LONG DESCRIPTION ===")
+for key in ['shortDescription', 'longDescription', 'productDescription', 'body_html']:
+    matches = re.findall(rf'["\x27]{key}["\x27]\s*:\s*["\x27]([^"\x27]{{10,}})', html)
+    if matches:
+        print(f"{key}: {repr(matches[0][:300])}")
+    else:
+        print(f"{key}: not found")
