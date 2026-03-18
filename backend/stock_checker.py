@@ -1,10 +1,13 @@
-"""Stock checker — periodically verify product availability.
+"""Stock checker — periodically verify product availability and live prices.
 
 Supports multiple store platforms via a dispatcher pattern.
 Each store has its own check function but returns a standardized result.
 
 Safety: products are NOT marked offline on first failure.
 Requires 3 consecutive failures before marking unavailable.
+
+Price tracking: live price is scraped on every check. If it differs from
+the stored sale_price, the DB is updated and a row is written to price_history.
 
 Run directly: python stock_checker.py
 Or import run_stock_check() — auto-scheduled via APScheduler in app.py.
@@ -73,15 +76,18 @@ def read_removal_log() -> list[dict]:
 #       "any_in_stock": True/False,  — is anything available?
 #       "sizes_available": int,      — how many sizes in stock
 #       "sizes": [...],              — per-size details (optional)
+#       "live_price": float or None, — current sale price from the store
+#       "live_original": float or None, — current compare-at / original price
 #       "error": str or None,        — error message if success=False
 #   }
 
 
-# ── Shopify stock check (AFEW etc.) ──────────────────────────────
+# ── Shopify stock check (SNS, AFEW, Naked CPH etc.) ──────────────
 
 def check_shopify_stock(product_url: str, handle: str) -> dict:
-    """Check stock for a Shopify product via .js endpoint.
+    """Check stock and live price for a Shopify product via .js endpoint.
 
+    The Shopify .js endpoint returns price / compare_at_price in cents.
     Uses shared retry logic to handle rate limits and transient errors.
     """
     base = product_url.split("/products/")[0]
@@ -97,6 +103,8 @@ def check_shopify_stock(product_url: str, handle: str) -> dict:
                 "any_in_stock": False,
                 "sizes_available": 0,
                 "sizes": [],
+                "live_price": None,
+                "live_original": None,
                 "error": None,
             }
 
@@ -111,12 +119,20 @@ def check_shopify_stock(product_url: str, handle: str) -> dict:
                 "variant_id": str(v["id"]),
             })
 
+        # Shopify returns prices in cents — convert to euros/pounds
+        price_cents = data.get("price")
+        compare_cents = data.get("compare_at_price")
+        live_price = round(price_cents / 100, 2) if price_cents else None
+        live_original = round(compare_cents / 100, 2) if compare_cents else None
+
         return {
             "success": True,
             "online": True,
             "any_in_stock": any(s["in_stock"] for s in sizes),
             "sizes_available": sum(1 for s in sizes if s["in_stock"]),
             "sizes": sizes,
+            "live_price": live_price,
+            "live_original": live_original,
             "error": None,
         }
 
@@ -127,6 +143,8 @@ def check_shopify_stock(product_url: str, handle: str) -> dict:
             "any_in_stock": None,
             "sizes_available": 0,
             "sizes": [],
+            "live_price": None,
+            "live_original": None,
             "error": str(e),
         }
 
@@ -134,10 +152,10 @@ def check_shopify_stock(product_url: str, handle: str) -> dict:
 # ── END Clothing stock check (Algolia) ───────────────────────────
 
 def check_end_stock(product_url: str, sku: str | None) -> dict:
-    """Check stock for an END Clothing product via Algolia.
+    """Check stock and live price for an END Clothing product via Algolia.
 
     Re-queries the same Algolia proxy used during initial fetch.
-    Returns per-size stock status.
+    Returns per-size stock status and current price.
     """
     if not sku:
         # Try to extract SKU from URL
@@ -155,6 +173,8 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
             "any_in_stock": None,
             "sizes_available": 0,
             "sizes": [],
+            "live_price": None,
+            "live_original": None,
             "error": "No SKU available for Algolia lookup",
         }
 
@@ -188,6 +208,8 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
                 "any_in_stock": None,
                 "sizes_available": 0,
                 "sizes": [],
+                "live_price": None,
+                "live_original": None,
                 "error": f"Algolia HTTP {resp.status_code}",
             }
 
@@ -210,6 +232,8 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
                 "any_in_stock": False,
                 "sizes_available": 0,
                 "sizes": [],
+                "live_price": None,
+                "live_original": None,
                 "error": None,
             }
 
@@ -242,12 +266,18 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
         total_stock = hit.get("stock", 0)
         any_available = total_stock > 0 if total_stock is not None else any(s["in_stock"] for s in sizes)
 
+        # Extract live price from Algolia hit
+        live_price = hit.get("sale_price") or hit.get("price")
+        live_original = hit.get("original_price") or hit.get("compare_at_price")
+
         return {
             "success": True,
             "online": True,
             "any_in_stock": any_available,
             "sizes_available": sum(1 for s in sizes if s["in_stock"]),
             "sizes": sizes,
+            "live_price": float(live_price) if live_price else None,
+            "live_original": float(live_original) if live_original else None,
             "error": None,
         }
 
@@ -258,6 +288,8 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
             "any_in_stock": None,
             "sizes_available": 0,
             "sizes": [],
+            "live_price": None,
+            "live_original": None,
             "error": str(e),
         }
 
@@ -280,6 +312,8 @@ def check_product_stock(platform: str, product_url: str, slug: str, sku: str | N
         "any_in_stock": None,
         "sizes_available": 0,
         "sizes": [],
+        "live_price": None,
+        "live_original": None,
         "error": f"No stock checker for platform: {platform}",
     }
 
@@ -299,6 +333,7 @@ def _check_domain_batch(products_for_domain: list[dict]) -> list[tuple[dict, dic
             results.append((p, {
                 "success": False, "online": None, "any_in_stock": None,
                 "sizes_available": 0, "sizes": [],
+                "live_price": None, "live_original": None,
                 "error": "SKIPPED — domain unreachable this run",
                 "_skipped": True,
             }))
@@ -320,18 +355,75 @@ def _check_domain_batch(products_for_domain: list[dict]) -> list[tuple[dict, dic
     return results
 
 
+# ── Price change helper ──────────────────────────────────────────
+
+def _apply_price_update(
+    conn,
+    product_id: int,
+    slug: str,
+    old_sale: float,
+    old_original: float,
+    live_price: float,
+    live_original: float | None,
+    now: str,
+):
+    """Update sale_price / original_price / discount_pct if the live price differs.
+
+    Logs a row to price_history on every change.
+    """
+    price_changed = round(live_price, 2) != round(old_sale, 2)
+
+    # Use live_original if available, otherwise keep existing original_price
+    new_original = round(live_original, 2) if live_original else round(old_original, 2)
+    new_sale = round(live_price, 2)
+
+    # Recalculate discount percentage
+    if new_original and new_original > new_sale:
+        new_discount = round((1 - new_sale / new_original) * 100)
+    elif new_original and new_original == new_sale:
+        new_discount = 0
+    else:
+        # Can't compute discount (no original price or sale > original)
+        new_discount = 0
+
+    if price_changed:
+        old_discount = round((1 - round(old_sale, 2) / round(old_original, 2)) * 100) if old_original else 0
+
+        conn.execute(
+            """UPDATE products
+            SET sale_price = ?, original_price = ?, discount_pct = ?,
+                updated_at = ?
+            WHERE id = ?""",
+            (new_sale, new_original, new_discount, now, product_id),
+        )
+        conn.execute(
+            """INSERT INTO price_history
+            (product_id, old_price, new_price, old_discount, new_discount, changed_at)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (product_id, round(old_sale, 2), new_sale, old_discount, new_discount, now),
+        )
+        logger.info(
+            f"  {slug}: price updated €{old_sale:.2f} → €{new_sale:.2f} "
+            f"(discount {old_discount}% → {new_discount}%)"
+        )
+
+
 # ── Main stock check loop ────────────────────────────────────────
 
 def run_stock_check():
-    """Check all products and update the database.
+    """Check all products, update stock status, and sync live prices.
 
     Safety rules:
-    - Failed checks (network errors, timeouts) do NOT change product status
+    - Failed checks (network errors, timeouts) do NOT change product status or price
     - Network errors do NOT increment fail_count (prevents false removals)
     - Products need 3 consecutive "confirmed gone" results before removal
     - Only confident "online=False" results increment fail_count
     - Successful checks reset the fail counter
     - Domains that fail with DNS/timeout are skipped for remaining products
+
+    Price tracking:
+    - live_price from each check is compared to stored sale_price
+    - Any change updates sale_price, recalculates discount_pct, and writes to price_history
     """
     global last_run, last_result
 
@@ -340,7 +432,7 @@ def run_stock_check():
 
     products = conn.execute(
         """SELECT p.id, p.slug, p.product_url, p.sku, p.in_stock,
-                  p.fail_count, p.sale_price, s.platform
+                  p.fail_count, p.sale_price, p.original_price, s.platform
         FROM products p
         JOIN stores s ON p.store_id = s.id"""
     ).fetchall()
@@ -354,6 +446,7 @@ def run_stock_check():
     failed = 0
     skipped = 0
     marked_offline = 0
+    price_updates = 0
 
     logger.info(f"Stock check started — {total} products")
 
@@ -452,12 +545,32 @@ def run_stock_check():
                             (in_stock_val, now, product_id, size["label"]),
                         )
 
+                # ── Live price sync ──────────────────────────────
+                live_price = result.get("live_price")
+                live_original = result.get("live_original")
+                if live_price and live_price > 0:
+                    before_count = price_updates
+                    _apply_price_update(
+                        conn=conn,
+                        product_id=product_id,
+                        slug=p["slug"],
+                        old_sale=p["sale_price"],
+                        old_original=p["original_price"],
+                        live_price=live_price,
+                        live_original=live_original,
+                        now=now,
+                    )
+                    # Check if the function logged a change (hack: re-query isn't needed,
+                    # we detect by comparing prices directly)
+                    if round(live_price, 2) != round(p["sale_price"], 2):
+                        price_updates += 1
+
                 status = "in stock" if result["any_in_stock"] else "SOLD OUT"
                 logger.info(f"  {p['slug']}: {status} ({result['sizes_available']} sizes)")
                 updated += 1
 
         else:
-            # ❌ Network error — do NOT increment fail_count
+            # ❌ Network error — do NOT increment fail_count or touch price
             # Only update last_checked so we know we tried
             conn.execute(
                 "UPDATE products SET last_checked = ? WHERE id = ?",
@@ -492,6 +605,7 @@ def run_stock_check():
         "failed_checks": failed,
         "skipped": skipped,
         "marked_offline": marked_offline,
+        "price_updates": price_updates,
     }
     logger.info(f"Stock check complete: {last_result}")
     return last_result
