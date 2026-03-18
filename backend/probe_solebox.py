@@ -1,38 +1,34 @@
-"""Extract ShopKey value and Authorization header construction from main.js."""
-import re, sys
+"""Extract SCAYLE creds + OAuth endpoint, then get Bearer token and hit products API."""
+import re, json, sys
 sys.path.insert(0, '.')
 from curl_cffi import requests as cffi_requests
 
 session = cffi_requests.Session()
 session.get("https://www.solebox.com/en-eu/", impersonate="chrome", timeout=15)
+js = session.get("https://www.solebox.com/main.js", impersonate="chrome", timeout=20).text
+print(f"main.js length: {len(js)}")
 
-resp = session.get("https://www.solebox.com/main.js", impersonate="chrome", timeout=20)
-js = resp.text
+for label, pattern in [
+    ("SCAYLE_NAME",     r'SCAYLE_NAME["\s:=,}]{0,10}["\']([^"\'`\s]{2,80})'),
+    ("SCAYLE_PASSWORD", r'SCAYLE_PASSWORD["\s:=,}]{0,10}["\']([^"\'`\s]{2,80})'),
+    ("client_id",       r'client_id["\s:=,}]{0,10}["\']([^"\'`\s]{2,80})'),
+    ("client_secret",   r'client_secret["\s:=,}]{0,10}["\']([^"\'`\s]{2,80})'),
+    ("oauth_token_url", r'(https?://[^\s"\']{5,80}(?:oauth|token)[^\s"\']{0,40})'),
+    ("scayleShopId",    r'scayleShopId["\s:=,}]{0,10}["\']?(\w+)'),
+]:
+    hits = re.findall(pattern, js, re.IGNORECASE)
+    if hits:
+        print(f"\n{label}: {hits[:5]}")
 
-# Find context around StoreAvailableShopKey
-print("=== StoreAvailableShopKey contexts ===")
-for m in re.finditer(r'StoreAvailableShopKey', js):
-    pos = m.start()
-    print(f"\npos {pos}: ...{js[max(0,pos-120):pos+120]}...")
+# Check if the ngsw-cached product page HTML contains the full API response
+html = session.get(
+    "https://www.solebox.com/en-eu/p/nike-wmns-air-force-107-low-se-valentines-day-2026-light-pink-94471",
+    impersonate="chrome", timeout=20
+).text
 
-# Find context around Authorization header assignment
-print("\n=== Authorization header construction ===")
-for m in re.finditer(r'Authorization', js):
-    pos = m.start()
-    chunk = js[max(0,pos-80):pos+200]
-    if any(k in chunk for k in ['Bearer', 'token', 'key', 'shop', 'header']):
-        print(f"\npos {pos}: ...{chunk}...")
-
-# Find SCAYLE_PASSWORD full context
-print("\n=== SCAYLE_PASSWORD context ===")
-for m in re.finditer(r'SCAYLE_PASSWORD', js):
-    pos = m.start()
-    print(f"\npos {pos}: ...{js[max(0,pos-50):pos+150]}...")
-
-# Find 'ShopKey' header string (lowercase or camel)
-print("\n=== 'shopkey' header string ===")
-for m in re.finditer(r'[Ss]hop.{0,3}[Kk]ey', js):
-    pos = m.start()
-    chunk = js[max(0,pos-60):pos+150]
-    if any(k in chunk.lower() for k in ['header', 'bearer', 'token', 'set', 'append']):
-        print(f"\npos {pos}: ...{chunk}...")
+idx = html.find('products/94471')
+if idx > 0:
+    print(f"\nContext around 'products/94471' in HTML (pos {idx}):")
+    print(html[idx:idx+800])
+else:
+    print("\n'products/94471' not found in HTML")
