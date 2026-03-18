@@ -29,6 +29,12 @@ class NakedFetchInput(BaseModel):
     category_override: Optional[str] = None  # only set when user explicitly picks
 
 
+class SoleboxFetchInput(BaseModel):
+    product_url: str
+    featured: bool = False
+    category_override: Optional[str] = None  # only set when user explicitly picks
+
+
 class ManualProductInput(BaseModel):
     name: str
     brand: str

@@ -15,11 +15,12 @@ from fastapi.responses import FileResponse
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from database import get_db, init_db, insert_product, insert_images, insert_sizes, get_all_products, get_product_by_slug, get_store_by_platform
-from models import ManualProductInput, ShopifyFetchInput, EndFetchInput, SnsFetchInput, NakedFetchInput, ProductCardOut, ProductDetailOut, StoreOut
+from models import ManualProductInput, ShopifyFetchInput, EndFetchInput, SnsFetchInput, NakedFetchInput, SoleboxFetchInput, ProductCardOut, ProductDetailOut, StoreOut
 from fetchers.shopify import fetch_shopify_product
 from fetchers.end_clothing import fetch_end_product
 from fetchers.sns import fetch_sns_product
 from fetchers.naked import fetch_naked_product
+from fetchers.solebox import fetch_solebox_product
 from fetchers.manual import build_manual_product
 from stock_checker import run_stock_check, get_status as get_stock_status, read_removal_log
 from auth import check_password, create_session_token, is_authenticated, require_auth, COOKIE_NAME, SESSION_MAX_AGE
@@ -243,9 +244,7 @@ def delete_product(slug: str, request: Request):
 
     pid = row["id"]
     try:
-        # Use explicit transaction for atomic deletion
         conn.execute("BEGIN")
-        # Delete in order: stock_checks, images, sizes, then product
         conn.execute("DELETE FROM stock_checks WHERE product_id = ?", (pid,))
         conn.execute("DELETE FROM product_images WHERE product_id = ?", (pid,))
         conn.execute("DELETE FROM product_sizes WHERE product_id = ?", (pid,))
@@ -255,7 +254,7 @@ def delete_product(slug: str, request: Request):
         conn.execute("ROLLBACK")
         conn.close()
         raise HTTPException(status_code=500, detail=f"Failed to delete: {e}")
-    
+
     conn.close()
     return {"message": "Deleted"}
 
@@ -286,7 +285,45 @@ def add_shopify_product(input: ShopifyFetchInput, request: Request):
         conn.execute("ROLLBACK")
         conn.close()
         raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
-    
+
+    conn.close()
+    return {
+        "id": product_id,
+        "slug": product_data["slug"],
+        "category": product_data.get("category", "sneakers"),
+        "message": "Product added",
+    }
+
+
+@app.post("/api/products/solebox")
+def add_solebox_product(input: SoleboxFetchInput, request: Request):
+    """Fetch and add a product from Solebox. Requires auth."""
+    require_auth(request)
+    try:
+        product_data = fetch_solebox_product(input.product_url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to fetch product: {e}")
+
+    conn = get_db()
+    store = get_store_by_platform(conn, "solebox.com")
+    product_data["store_id"] = store["id"] if store else None
+
+    if input.category_override:
+        product_data["category"] = input.category_override
+
+    try:
+        conn.execute("BEGIN")
+        product_id = insert_product(conn, product_data)
+        insert_images(conn, product_id, product_data["images"])
+        insert_sizes(conn, product_id, product_data["sizes"])
+        conn.execute("COMMIT")
+    except Exception as e:
+        conn.execute("ROLLBACK")
+        conn.close()
+        raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
+
     conn.close()
     return {
         "id": product_id,
@@ -325,7 +362,7 @@ def add_end_product(input: EndFetchInput, request: Request):
         conn.execute("ROLLBACK")
         conn.close()
         raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
-    
+
     conn.close()
     return {
         "id": product_id,
@@ -364,7 +401,7 @@ def add_sns_product(input: SnsFetchInput, request: Request):
         conn.execute("ROLLBACK")
         conn.close()
         raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
-    
+
     conn.close()
     return {
         "id": product_id,
@@ -385,7 +422,7 @@ def add_naked_product(input: NakedFetchInput, request: Request):
 
     conn = get_db()
     store = get_store_by_platform(conn, product_data["_base_url"])
-    store_id = store["id"] if store else 4  # Assume store_id 4 for Naked Copenhagen
+    store_id = store["id"] if store else 4
     product_data["store_id"] = store_id
 
     if input.category_override:
@@ -401,7 +438,7 @@ def add_naked_product(input: NakedFetchInput, request: Request):
         conn.execute("ROLLBACK")
         conn.close()
         raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
-    
+
     conn.close()
     return {
         "id": product_id,
@@ -431,7 +468,7 @@ def add_manual_product(input: ManualProductInput, request: Request):
         conn.execute("ROLLBACK")
         conn.close()
         raise HTTPException(status_code=400, detail=f"Failed to save product: {e}")
-    
+
     conn.close()
     return {"id": product_id, "slug": product_data["slug"], "message": "Product added"}
 
