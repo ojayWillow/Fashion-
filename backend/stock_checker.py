@@ -48,6 +48,12 @@ SHOPIFY_HTML_ONLY_DOMAINS = {
     "www.nakedcph.com",
 }
 
+# Solebox domains — use dedicated SoleboxScraper, not Shopify .js
+SOLEBOX_DOMAINS = {
+    "www.solebox.com",
+    "solebox.com",
+}
+
 
 # ── Removal audit log ────────────────────────────────────────────
 
@@ -181,6 +187,82 @@ def check_shopify_stock(product_url: str, handle: str) -> dict:
             "sizes": sizes,
             "live_price": live_price,
             "live_original": live_original,
+            "error": None,
+        }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "online": None,
+            "any_in_stock": None,
+            "sizes_available": 0,
+            "sizes": [],
+            "live_price": None,
+            "live_original": None,
+            "error": str(e),
+        }
+
+
+# ── Solebox stock check (ngsw HTML cache scraping) ───────────────
+
+def check_solebox_stock(product_url: str) -> dict:
+    """Check stock for Solebox via the dedicated SoleboxScraper.
+
+    Solebox uses the Scayle/NGSW platform — not Shopify.
+    The scraper extracts per-size stock from the ngsw HTML cache.
+    """
+    try:
+        from scraper_solebox import SoleboxScraper
+
+        # Extract the slug from the URL: /en-eu/p/{slug} or /en-eu/p/{slug}/{variantId}
+        path = urlparse(product_url).path.rstrip("/")
+        parts = path.split("/p/")
+        if len(parts) < 2:
+            raise ValueError(f"Cannot extract Solebox slug from URL: {product_url}")
+        # Take only the slug part (first segment after /p/), drop any trailing variant ID
+        slug = parts[1].split("/")[0]
+
+        scraper = SoleboxScraper()
+        data = scraper.get_product(slug)
+
+        if not data:
+            return {
+                "success": True,
+                "online": False,
+                "any_in_stock": False,
+                "sizes_available": 0,
+                "sizes": [],
+                "live_price": None,
+                "live_original": None,
+                "error": None,
+            }
+
+        sizes = []
+        for s in data.get("sizes", []):
+            sizes.append({
+                "label": s.get("eu") or s.get("us") or s.get("referenceKey"),
+                "in_stock": s.get("inStock", False),
+                "variant_id": s.get("referenceKey"),
+            })
+
+        any_in_stock = not data.get("isSoldOut", True)
+        sizes_available = sum(1 for s in sizes if s["in_stock"])
+
+        # Use first in-stock size price as the live price
+        live_price = None
+        for s in data.get("sizes", []):
+            if s.get("inStock") and s.get("price_eur"):
+                live_price = float(s["price_eur"])
+                break
+
+        return {
+            "success": True,
+            "online": True,
+            "any_in_stock": any_in_stock,
+            "sizes_available": sizes_available,
+            "sizes": sizes,
+            "live_price": live_price,
+            "live_original": None,
             "error": None,
         }
 
@@ -342,6 +424,10 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
 def check_product_stock(platform: str, product_url: str, slug: str, sku: str | None) -> dict:
     """Route stock check to the correct store-specific function."""
     domain = urlparse(product_url).netloc
+
+    # Solebox uses its own scraper regardless of stored platform value
+    if domain in SOLEBOX_DOMAINS:
+        return check_solebox_stock(product_url)
 
     if platform == "shopify":
         # Naked CPH blocks .js — use HTML scraper, never overwrite price
