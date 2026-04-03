@@ -16,15 +16,19 @@ Image strategy:
     2. Collecting all w_680 URLs in the HTML that contain that same image ID
   This reliably gets all angles (front, back, side etc.) without false positives.
 
-Price structure (Scayle):
-  - price.withTax         = current price in cents (e.g. 2499 = 24.99)
-  - price.wasPriceNumeric = original price in cents when on sale
-  - stock.quantity > 0    = in stock
-  - sizeMap.sizeEu        = EU size label
+Price sources (two separate flows — do NOT mix them up):
+  SOURCE A — ngsw cache (preferred, has per-size data):
+    - price.withTax         = current price in CENTS (e.g. 21399 = €213.99)
+    - price.wasPriceNumeric = original price in CENTS when on sale
+    - Always use _cents_to_eur() to convert.
 
-JSON-LD price note:
-  Scayle also emits prices in cents inside the JSON-LD <offers> block.
-  We always divide by 100 to convert to euros.
+  SOURCE B — JSON-LD <offers> block (fallback, no per-size data):
+    - offers.price          = current price already in EUROS as a float (e.g. 213.99)
+    - Do NOT divide by 100 — use as-is.
+    - Only used when ngsw cache extraction fails.
+
+  stock.quantity > 0    = in stock
+  sizeMap.sizeEu        = EU size label
 """
 import re
 import json
@@ -61,6 +65,9 @@ def _warm_session():
 
 
 def _cents_to_eur(cents) -> float | None:
+    """Convert Scayle ngsw cache prices from cents to euros.
+    ONLY use this for ngsw cache prices. JSON-LD prices are already in euros.
+    """
     if cents is None:
         return None
     return round(int(cents) / 100, 2)
@@ -97,15 +104,7 @@ def _extract_ngsw_product(html: str) -> dict | None:
 
 
 def _extract_product_images(html: str, name: str, json_ld: dict) -> list:
-    """Extract full-size product images from asset.solebox.com.
-
-    Strategy:
-    - The JSON-LD image field contains the first image URL which includes the
-      product's numeric image ID (e.g. "02481113").
-    - We use that ID to find all w_680,h_680 CDN URLs for this specific product,
-      which are the full-size gallery images Solebox shows on the product page.
-    - Falls back to just the JSON-LD image if we can't extract the ID.
-    """
+    """Extract full-size product images from asset.solebox.com."""
     images = []
     seen = set()
 
@@ -114,8 +113,6 @@ def _extract_product_images(html: str, name: str, json_ld: dict) -> list:
             seen.add(url)
             images.append({"url": url, "alt": name})
 
-    # Step 1: get product image ID from the JSON-LD image URL
-    # e.g. "https://asset.solebox.com/images/f_auto,q_100/02481113_1/..."
     ld_image = json_ld.get("image", "")
     first_url = ld_image if isinstance(ld_image, str) else (ld_image[0] if isinstance(ld_image, list) and ld_image else "")
 
@@ -126,7 +123,6 @@ def _extract_product_images(html: str, name: str, json_ld: dict) -> list:
         logger.info(f"Solebox product image ID: {image_id}")
 
     if image_id:
-        # Step 2: find all full-size (w_680) URLs for this product's image ID
         pattern = re.compile(
             r'(https://asset\.solebox\.com/images/[^\s"]+w_680[^\s"]*/' + re.escape(image_id) + r'_[0-9]+/[^\s"]+)',
             re.IGNORECASE,
@@ -135,7 +131,6 @@ def _extract_product_images(html: str, name: str, json_ld: dict) -> list:
             add(url)
         logger.info(f"Found {len(images)} full-size images for product ID {image_id}")
 
-    # Fallback: use JSON-LD image directly if we got nothing
     if not images:
         logger.warning("Could not find w_680 images, falling back to JSON-LD image")
         if isinstance(ld_image, str) and ld_image:
@@ -164,7 +159,7 @@ def fetch_solebox_product(product_url: str) -> dict:
     resp.raise_for_status()
     html = resp.text
 
-    # ── JSON-LD for name, brand, color, description ───────────────────────────
+    # ── JSON-LD: name, brand, color, description, fallback price ─────────────
     json_ld = None
     for match in re.finditer(r'<script type="application/ld\+json">(.*?)</script>', html, re.DOTALL):
         try:
@@ -188,16 +183,18 @@ def fetch_solebox_product(product_url: str) -> dict:
     ld_price_raw = offers.get("price")
     ld_available = offers.get("availability", "") == "https://schema.org/InStock"
 
-    # Scayle JSON-LD emits prices in cents — always divide by 100
-    ld_price = round(float(ld_price_raw) / 100, 2) if ld_price_raw is not None else None
+    # JSON-LD price is already in euros (e.g. 213.99) — do NOT divide by 100
+    ld_price = round(float(ld_price_raw), 2) if ld_price_raw is not None else None
+    logger.info(f"JSON-LD price (euros, fallback only): {ld_price}")
 
     # ── Images ────────────────────────────────────────────────────────────
     images = _extract_product_images(html, name, json_ld)
 
-    # ── Variants via ngsw cache ───────────────────────────────────────────────
+    # ── Variants + prices via ngsw cache (prices in CENTS here) ──────────────
     body = _extract_ngsw_product(html)
 
     sizes = []
+    # Default to JSON-LD euro price; will be overridden by ngsw cents if cache found
     sale_price     = ld_price
     original_price = ld_price
 
@@ -243,19 +240,23 @@ def fetch_solebox_product(product_url: str) -> dict:
 
         if raw_variants:
             fp = raw_variants[0].get('price', {})
-            # ngsw cache prices are also in cents — use _cents_to_eur()
+            # ngsw prices are in CENTS — convert with _cents_to_eur()
             cents_sale     = fp.get('withTax')
             cents_original = fp.get('wasPriceNumeric')
+
+            logger.info(f"ngsw raw price cents: withTax={cents_sale}, wasPriceNumeric={cents_original}")
+
             if cents_sale is not None:
                 sale_price = _cents_to_eur(cents_sale)
+                logger.info(f"ngsw sale_price (converted from cents): €{sale_price}")
             if cents_original is not None:
                 original_price = _cents_to_eur(cents_original)
-            # If no wasPriceNumeric (not on sale), original == sale
+            # Not on sale: original == sale
             if original_price is None:
                 original_price = sale_price
 
     else:
-        logger.warning("ngsw cache empty — falling back to JSON-LD price only, no per-size data")
+        logger.warning("ngsw cache empty — using JSON-LD price as-is (already in euros), no per-size data")
 
     if sale_price is None:
         raise ValueError("Could not determine product price")
@@ -265,6 +266,7 @@ def fetch_solebox_product(product_url: str) -> dict:
     discount_pct   = round((1 - sale_price / original_price) * 100) if original_price > sale_price else 0
     any_in_stock   = any(s['in_stock'] for s in sizes) if sizes else ld_available
     in_stock_count = sum(1 for s in sizes if s['in_stock'])
+    logger.info(f"Final price: sale=€{sale_price} original=€{original_price} discount={discount_pct}%")
     logger.info(f"Sizes: {in_stock_count}/{len(sizes)} in stock")
 
     tags     = [color] if color else []
