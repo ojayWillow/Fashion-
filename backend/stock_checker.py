@@ -55,7 +55,7 @@ SOLEBOX_DOMAINS = {
 }
 
 
-# ── Removal audit log ────────────────────────────────────────────
+# ── Removal audit log ────────────────────────────────────
 
 def _log_removal(slug: str, product_url: str, reason: str, fail_count: int, last_known_price: float):
     """Append a row to the removal audit CSV."""
@@ -86,7 +86,7 @@ def read_removal_log() -> list[dict]:
         return list(reader)
 
 
-# ── Standardized result format ────────────────────────────────────
+# ── Standardized result format ──────────────────────────────────
 #
 #   {
 #       "success": True/False,          — did the check itself work?
@@ -135,7 +135,7 @@ def check_naked_stock(product_url: str) -> dict:
         }
 
 
-# ── Shopify stock check (SNS, AFEW etc.) ────────────────────────
+# ── Shopify stock check (SNS, AFEW etc.) ──────────────────────
 
 def check_shopify_stock(product_url: str, handle: str) -> dict:
     """Check stock and live price for a Shopify product via .js endpoint.
@@ -203,13 +203,18 @@ def check_shopify_stock(product_url: str, handle: str) -> dict:
         }
 
 
-# ── Solebox stock check (ngsw HTML cache scraping) ───────────────
+# ── Solebox stock check (ngsw HTML cache scraping) ─────────────────
 
 def check_solebox_stock(product_url: str) -> dict:
     """Check stock for Solebox via the dedicated SoleboxScraper.
 
     Solebox uses the Scayle/NGSW platform — not Shopify.
     The scraper extracts per-size stock from the ngsw HTML cache.
+
+    Price: use data['sale_price_eur'] and data['original_price_eur'] — these are
+    product-level prices in EUR (already divided by 100).
+    Do NOT use s['price_eur'] from individual size entries — that is the per-variant
+    shelf price which does not reflect product-level promotions/sales.
     """
     try:
         from scraper_solebox import SoleboxScraper
@@ -248,12 +253,10 @@ def check_solebox_stock(product_url: str) -> dict:
         any_in_stock = not data.get("isSoldOut", True)
         sizes_available = sum(1 for s in sizes if s["in_stock"])
 
-        # Use first in-stock size price as the live price
-        live_price = None
-        for s in data.get("sizes", []):
-            if s.get("inStock") and s.get("price_eur"):
-                live_price = float(s["price_eur"])
-                break
+        # Use product-level sale price (already in EUR, divided by 100 in scraper_solebox.py)
+        # Do NOT use per-variant s['price_eur'] — it ignores product-level promotions
+        live_price    = data.get("sale_price_eur")
+        live_original = data.get("original_price_eur")
 
         return {
             "success": True,
@@ -262,7 +265,7 @@ def check_solebox_stock(product_url: str) -> dict:
             "sizes_available": sizes_available,
             "sizes": sizes,
             "live_price": live_price,
-            "live_original": None,
+            "live_original": live_original,
             "error": None,
         }
 
@@ -419,7 +422,7 @@ def check_end_stock(product_url: str, sku: str | None) -> dict:
         }
 
 
-# ── Dispatcher ───────────────────────────────────────────────────
+# ── Dispatcher ────────────────────────────────────────────────
 
 def check_product_stock(platform: str, product_url: str, slug: str, sku: str | None) -> dict:
     """Route stock check to the correct store-specific function."""
@@ -452,7 +455,7 @@ def check_product_stock(platform: str, product_url: str, slug: str, sku: str | N
     }
 
 
-# ── Worker: check all products for one domain ────────────────────
+# ── Worker: check all products for one domain ───────────────────────
 
 def _check_domain_batch(products_for_domain: list[dict]) -> list[tuple[dict, dict]]:
     """Check products for a single domain sequentially.
@@ -531,7 +534,7 @@ def _apply_price_update(
     )
 
 
-# ── Main stock check loop ────────────────────────────────────────
+# ── Main stock check loop ──────────────────────────────────────────
 
 def run_stock_check():
     """Check all active products, update stock status, and sync live prices.
