@@ -17,15 +17,19 @@ Image strategy:
   This reliably gets all angles (front, back, side etc.) without false positives.
 
 Price sources (two separate flows — do NOT mix them up):
-  SOURCE A — ngsw cache (preferred, has per-size data):
-    - price.withTax         = current price in CENTS (e.g. 21399 = €213.99)
-    - price.wasPriceNumeric = original price in CENTS when on sale
-    - Always use _cents_to_eur() to convert.
+  SOURCE A — ngsw cache (preferred):
+    Product-level price (body['priceRange'] or body['price']):
+      - priceRange.min.withTax        = lowest current price in CENTS (best deal)
+      - priceRange.min.wasPriceNumeric = original/RRP in CENTS when on sale
+      - price.withTax                 = fallback product price in CENTS
+      - price.wasPriceNumeric         = fallback original price in CENTS
+    Always use _cents_to_eur() to convert.
+    ⚠️  Do NOT use variant[0].price — that is the per-variant shelf price, NOT the sale price.
 
   SOURCE B — JSON-LD <offers> block (fallback, no per-size data):
-    - offers.price          = current price already in EUROS as a float (e.g. 213.99)
+    - offers.price = current price already in EUROS as a float (e.g. 120.74)
     - Do NOT divide by 100 — use as-is.
-    - Only used when ngsw cache extraction fails.
+    - Only used when ngsw cache extraction fails entirely.
 
   stock.quantity > 0    = in stock
   sizeMap.sizeEu        = EU size label
@@ -143,6 +147,40 @@ def _extract_product_images(html: str, name: str, json_ld: dict) -> list:
     return images
 
 
+def _get_product_price(body: dict) -> tuple[float | None, float | None]:
+    """
+    Extract the product-level sale and original prices from the ngsw cache body.
+
+    Price hierarchy (checked in order):
+      1. body['priceRange']['min'] — lowest price across all variants (best deal shown on page)
+      2. body['price']             — single product price (when no priceRange)
+
+    Both sources store prices in CENTS. Always convert with _cents_to_eur().
+
+    Returns:
+        (sale_price_eur, original_price_eur)
+        original_price_eur == sale_price_eur when not on sale.
+    """
+    # Try priceRange.min first — this reflects the actual lowest/sale price shown on the page
+    price_range = body.get('priceRange', {})
+    range_min = price_range.get('min', {})
+    if range_min.get('withTax') is not None:
+        sale     = _cents_to_eur(range_min['withTax'])
+        original = _cents_to_eur(range_min.get('wasPriceNumeric')) or sale
+        logger.info(f"Price from priceRange.min — sale: €{sale}  original: €{original}")
+        return sale, original
+
+    # Fallback: body['price']
+    product_price = body.get('price', {})
+    if product_price.get('withTax') is not None:
+        sale     = _cents_to_eur(product_price['withTax'])
+        original = _cents_to_eur(product_price.get('wasPriceNumeric')) or sale
+        logger.info(f"Price from body.price — sale: €{sale}  original: €{original}")
+        return sale, original
+
+    return None, None
+
+
 def fetch_solebox_product(product_url: str) -> dict:
     """Fetch and parse a Solebox product page."""
     parsed = urlparse(product_url)
@@ -183,7 +221,7 @@ def fetch_solebox_product(product_url: str) -> dict:
     ld_price_raw = offers.get("price")
     ld_available = offers.get("availability", "") == "https://schema.org/InStock"
 
-    # JSON-LD price is already in euros (e.g. 213.99) — do NOT divide by 100
+    # JSON-LD price is already in euros — do NOT divide by 100
     ld_price = round(float(ld_price_raw), 2) if ld_price_raw is not None else None
     logger.info(f"JSON-LD price (euros, fallback only): {ld_price}")
 
@@ -194,7 +232,7 @@ def fetch_solebox_product(product_url: str) -> dict:
     body = _extract_ngsw_product(html)
 
     sizes = []
-    # Default to JSON-LD euro price; will be overridden by ngsw cents if cache found
+    # Default to JSON-LD euro price; overridden by ngsw product-level price if cache found
     sale_price     = ld_price
     original_price = ld_price
 
@@ -202,6 +240,7 @@ def fetch_solebox_product(product_url: str) -> dict:
         raw_variants = body.get('variants', [])
         logger.info(f"Found {len(raw_variants)} variants via ngsw cache")
 
+        # ── Sizes ────────────────────────────────────────────────────────
         for v in raw_variants:
             stock    = v.get('stock', {})
             in_stock = (stock.get('quantity', 0) > 0) or stock.get('isSellableWithoutStock', False)
@@ -238,22 +277,16 @@ def fetch_solebox_product(product_url: str) -> dict:
                 'ean':            ean,
             })
 
-        if raw_variants:
-            fp = raw_variants[0].get('price', {})
-            # ngsw prices are in CENTS — convert with _cents_to_eur()
-            cents_sale     = fp.get('withTax')
-            cents_original = fp.get('wasPriceNumeric')
-
-            logger.info(f"ngsw raw price cents: withTax={cents_sale}, wasPriceNumeric={cents_original}")
-
-            if cents_sale is not None:
-                sale_price = _cents_to_eur(cents_sale)
-                logger.info(f"ngsw sale_price (converted from cents): €{sale_price}")
-            if cents_original is not None:
-                original_price = _cents_to_eur(cents_original)
-            # Not on sale: original == sale
-            if original_price is None:
-                original_price = sale_price
+        # ── Product-level price (NOT variant[0].price) ───────────────────
+        # variant[0].price is the per-variant shelf price and does NOT reflect
+        # product-level sales/promotions. Use priceRange.min or body.price instead.
+        ngsw_sale, ngsw_original = _get_product_price(body)
+        if ngsw_sale is not None:
+            sale_price     = ngsw_sale
+            original_price = ngsw_original
+        else:
+            # ngsw had no product-level price — keep JSON-LD fallback
+            logger.warning("ngsw cache had no priceRange/price — keeping JSON-LD price as fallback")
 
     else:
         logger.warning("ngsw cache empty — using JSON-LD price as-is (already in euros), no per-size data")
