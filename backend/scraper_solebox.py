@@ -1,7 +1,29 @@
-"""Solebox scraper - extracts product variants, stock, sizes from ngsw HTML cache."""
+"""Solebox scraper - extracts product variants, stock, sizes from ngsw HTML cache.
+
+Price note:
+  All prices in the ngsw cache are in CENTS (Scayle/Shopify convention).
+  e.g. withTax=12074 means €120.74
+
+  Per-variant price (v['price']['withTax']) is the individual shelf price and
+  does NOT reflect product-level sales or promotions.
+
+  The correct sale price is at the product level:
+    body['priceRange']['min']['withTax']        -> lowest sale price in cents
+    body['priceRange']['min']['wasPriceNumeric'] -> original/RRP in cents
+    body['price']['withTax']                    -> fallback if no priceRange
+
+  Always divide by 100 before storing or returning.
+"""
 import re, json
 from urllib.parse import unquote
 from curl_cffi import requests as cffi_requests
+
+
+def _cents_to_eur(val) -> float | None:
+    """Convert Scayle ngsw cents value to euros. Returns None if val is None."""
+    if val is None:
+        return None
+    return round(int(val) / 100, 2)
 
 
 class SoleboxScraper:
@@ -45,10 +67,35 @@ class SoleboxScraper:
         raise ValueError("Product data not found in HTML ngsw cache")
 
     def _normalize(self, body: dict) -> dict:
-        """Return clean product dict with sizes and stock."""
+        """Return clean product dict with sizes and stock.
+
+        Price extraction order (product-level, NOT per-variant):
+          1. body['priceRange']['min'] -- reflects actual sale/promotion price
+          2. body['price']             -- fallback if no priceRange
+
+        Per-variant price (v['price']['withTax']) is included in each size entry
+        for reference but should NOT be used as the product price -- it does not
+        reflect product-level promotions.
+        """
+        # ── Product-level sale price (correct) ──────────────────────────────
+        sale_price_eur     = None
+        original_price_eur = None
+
+        price_range = body.get('priceRange', {})
+        range_min   = price_range.get('min', {})
+        if range_min.get('withTax') is not None:
+            sale_price_eur     = _cents_to_eur(range_min['withTax'])
+            original_price_eur = _cents_to_eur(range_min.get('wasPriceNumeric')) or sale_price_eur
+        else:
+            product_price = body.get('price', {})
+            if product_price.get('withTax') is not None:
+                sale_price_eur     = _cents_to_eur(product_price['withTax'])
+                original_price_eur = _cents_to_eur(product_price.get('wasPriceNumeric')) or sale_price_eur
+
+        # ── Per-variant sizes ────────────────────────────────────────────────
         sizes = []
         for v in body.get('variants', []):
-            sm = v.get('sizeMap', {})
+            sm    = v.get('sizeMap', {})
             stock = v.get('stock', {})
             price = v.get('price', {})
             sizes.append({
@@ -59,17 +106,22 @@ class SoleboxScraper:
                 'cm':           sm.get('sizeCm', {}).get('value'),
                 'quantity':     stock.get('quantity', 0),
                 'inStock':      stock.get('quantity', 0) > 0,
-                'price_eur':    price.get('withTax'),
+                # price_eur is per-variant shelf price in euros (cents / 100)
+                # Use only for display, not as the product sale price
+                'price_eur':    _cents_to_eur(price.get('withTax')),
                 'price_fmt':    price.get('formatted'),
             })
+
         return {
-            'id':           body.get('id'),
-            'referenceKey': body.get('referenceKey'),
-            'name':         body.get('displayName'),
-            'isSoldOut':    body.get('isSoldOut'),
-            'totalStock':   body.get('stock'),
-            'url':          body.get('url'),
-            'sizes':        sizes,
+            'id':                 body.get('id'),
+            'referenceKey':      body.get('referenceKey'),
+            'name':               body.get('displayName'),
+            'isSoldOut':          body.get('isSoldOut'),
+            'totalStock':         body.get('stock'),
+            'url':                body.get('url'),
+            'sale_price_eur':     sale_price_eur,      # product-level sale price in euros
+            'original_price_eur': original_price_eur,  # original/RRP in euros
+            'sizes':              sizes,
         }
 
 
@@ -80,8 +132,9 @@ if __name__ == '__main__':
     )
     print(f"Product: {product['name']} | id: {product['id']} | ref: {product['referenceKey']}")
     print(f"Sold out: {product['isSoldOut']} | Total stock: {product['totalStock']}")
+    print(f"Sale price: \u20ac{product['sale_price_eur']}  |  Original: \u20ac{product['original_price_eur']}")
     print(f"\nSizes ({len(product['sizes'])} variants):")
     print(f"{'EU':<6} {'UK':<6} {'US':<6} {'CM':<6} {'Qty':<5} {'In Stock':<10} Price")
     print("-" * 55)
     for s in product['sizes']:
-        print(f"{s['eu']:<6} {s['uk']:<6} {s['us']:<6} {s['cm']:<6} {s['quantity']:<5} {str(s['inStock']):<10} {s['price_fmt']}")
+        print(f"{str(s['eu']):<6} {str(s['uk']):<6} {str(s['us']):<6} {str(s['cm']):<6} {s['quantity']:<5} {str(s['inStock']):<10} €{s['price_eur']}")
