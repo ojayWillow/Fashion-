@@ -21,6 +21,10 @@ Price structure (Scayle):
   - price.wasPriceNumeric = original price in cents when on sale
   - stock.quantity > 0    = in stock
   - sizeMap.sizeEu        = EU size label
+
+JSON-LD price note:
+  Scayle also emits prices in cents inside the JSON-LD <offers> block.
+  We always divide by 100 to convert to euros.
 """
 import re
 import json
@@ -123,7 +127,6 @@ def _extract_product_images(html: str, name: str, json_ld: dict) -> list:
 
     if image_id:
         # Step 2: find all full-size (w_680) URLs for this product's image ID
-        # Pattern: asset.solebox.com/images/<transforms>/w_680,h_680/<id>_<n>/<slug>
         pattern = re.compile(
             r'(https://asset\.solebox\.com/images/[^\s"]+w_680[^\s"]*/' + re.escape(image_id) + r'_[0-9]+/[^\s"]+)',
             re.IGNORECASE,
@@ -182,8 +185,11 @@ def fetch_solebox_product(product_url: str) -> dict:
     description = json_ld.get("description", "").strip()
 
     offers       = json_ld.get("offers", {})
-    ld_price     = offers.get("price")
+    ld_price_raw = offers.get("price")
     ld_available = offers.get("availability", "") == "https://schema.org/InStock"
+
+    # Scayle JSON-LD emits prices in cents — always divide by 100
+    ld_price = round(float(ld_price_raw) / 100, 2) if ld_price_raw is not None else None
 
     # ── Images ────────────────────────────────────────────────────────────
     images = _extract_product_images(html, name, json_ld)
@@ -192,8 +198,8 @@ def fetch_solebox_product(product_url: str) -> dict:
     body = _extract_ngsw_product(html)
 
     sizes = []
-    sale_price     = float(ld_price) if ld_price else None
-    original_price = float(ld_price) if ld_price else None
+    sale_price     = ld_price
+    original_price = ld_price
 
     if body:
         raw_variants = body.get('variants', [])
@@ -237,13 +243,19 @@ def fetch_solebox_product(product_url: str) -> dict:
 
         if raw_variants:
             fp = raw_variants[0].get('price', {})
-            sale_price     = _cents_to_eur(fp.get('withTax'))         or sale_price
-            original_price = _cents_to_eur(fp.get('wasPriceNumeric')) or sale_price
+            # ngsw cache prices are also in cents — use _cents_to_eur()
+            cents_sale     = fp.get('withTax')
+            cents_original = fp.get('wasPriceNumeric')
+            if cents_sale is not None:
+                sale_price = _cents_to_eur(cents_sale)
+            if cents_original is not None:
+                original_price = _cents_to_eur(cents_original)
+            # If no wasPriceNumeric (not on sale), original == sale
+            if original_price is None:
+                original_price = sale_price
 
     else:
         logger.warning("ngsw cache empty — falling back to JSON-LD price only, no per-size data")
-        if ld_price:
-            sale_price = original_price = float(ld_price)
 
     if sale_price is None:
         raise ValueError("Could not determine product price")
